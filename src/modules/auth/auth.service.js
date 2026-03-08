@@ -5,12 +5,68 @@ const { setex, get, del } = require('../../config/redis');
 const logger = require('../../config/logger');
 
 const OTP_TTL = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 minutes
-const PLATFORM = process.env.NODE_ENV === 'development'; // dev: skip real OTP
+const IS_DEV  = process.env.NODE_ENV === 'development';
 
-// ─── Generate 4-digit OTP ────────────────────────────────────────────────────
-const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
+// SMS provider: 'fast2sms' | 'msg91' | 'twilio'  (set SMS_PROVIDER in .env)
+const SMS_PROVIDER = (process.env.SMS_PROVIDER || 'fast2sms').toLowerCase();
 
-// ─── Send OTP via Twilio ─────────────────────────────────────────────────────
+// ─── Generate 6-digit OTP ────────────────────────────────────────────────────
+const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+
+// ─── Send OTP via Fast2SMS (Cheapest Indian — ₹0.04/SMS) ─────────────────────
+const sendViaFast2SMS = async (phone, otp) => {
+  const axios = require('axios');
+  // Remove country code — Fast2SMS needs 10-digit number
+  const mobile = phone.replace(/^\+91/, '').replace(/\D/g, '');
+  const res = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
+    params: {
+      authorization: process.env.FAST2SMS_API_KEY,
+      variables_values: otp,
+      route: 'otp',
+      numbers: mobile,
+    },
+    timeout: 10000,
+  });
+  if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS failed');
+};
+
+// ─── Send OTP via MSG91 (Most Popular Indian — ₹0.18/SMS) ────────────────────
+const sendViaMSG91 = async (phone, otp) => {
+  const axios = require('axios');
+  // MSG91 needs country code without +
+  const mobile = phone.replace('+', '');
+  const res = await axios.post(
+    'https://control.msg91.com/api/v5/otp',
+    {
+      template_id: process.env.MSG91_TEMPLATE_ID,
+      mobile,
+      otp,
+    },
+    {
+      headers: {
+        authkey: process.env.MSG91_AUTH_KEY,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    }
+  );
+  if (res.data.type !== 'success') throw new Error(res.data.message || 'MSG91 failed');
+};
+
+// ─── Send OTP via Twilio (International — $0.10/SMS) ─────────────────────────
+const sendViaTwilio = async (phone, otp) => {
+  const twilio = require('twilio')(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  );
+  await twilio.messages.create({
+    body: `Your SocialCall OTP is: ${otp}. Valid for 5 minutes. Do not share.`,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    to: phone,
+  });
+};
+
+// ─── Main sendOtp function ────────────────────────────────────────────────────
 const sendOtp = async (phone) => {
   const otp = generateOtp();
   const key = `otp:${phone}`;
@@ -22,25 +78,24 @@ const sendOtp = async (phone) => {
   await setex(key, OTP_TTL, otp);
   await setex(`otp_attempts:${phone}`, 600, String(parseInt(attempts) + 1));
 
-  if (PLATFORM) {
-    // Development: log OTP to console
+  // Development: just log to console — no SMS sent
+  if (IS_DEV) {
     logger.info(`[DEV OTP] ${phone} → ${otp}`);
-    return { message: `OTP sent (dev: ${otp})`, otp }; // remove otp in prod
+    return { message: `OTP sent (dev: ${otp})`, otp };
   }
 
-  // Production: send via Twilio
+  // Production: send via selected provider
   try {
-    const twilio = require('twilio')(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_AUTH_TOKEN
-    );
-    await twilio.messages.create({
-      body: `Your SocialCall OTP is: ${otp}. Valid for 5 minutes. Do not share with anyone.`,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: phone,
-    });
+    if (SMS_PROVIDER === 'fast2sms') {
+      await sendViaFast2SMS(phone, otp);
+    } else if (SMS_PROVIDER === 'msg91') {
+      await sendViaMSG91(phone, otp);
+    } else {
+      await sendViaTwilio(phone, otp);
+    }
+    logger.info(`OTP sent via ${SMS_PROVIDER}`, { phone });
   } catch (err) {
-    logger.error('Twilio error', { phone, error: err.message });
+    logger.error(`${SMS_PROVIDER} OTP error`, { phone, error: err.message });
     throw { status: 503, message: 'Failed to send OTP. Please try again.' };
   }
 
