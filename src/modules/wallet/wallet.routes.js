@@ -1,0 +1,73 @@
+const router = require('express').Router();
+const { body } = require('express-validator');
+const { validate } = require('../../middleware/errorHandler');
+const { authenticate } = require('../../middleware/auth');
+const svc = require('./wallet.service');
+
+// GET /api/wallet — get balance + stats
+router.get('/', authenticate, async (req, res) => {
+  const wallet = await svc.getWallet(req.user.id);
+  res.json({ success: true, data: wallet });
+});
+
+// POST /api/wallet/order — create Razorpay order
+router.post('/order', authenticate,
+  [
+    body('amount').isFloat({ min: 10 }).withMessage('Minimum recharge is ₹10'),
+    validate,
+  ],
+  async (req, res) => {
+    const order = await svc.createOrder(req.user.id, req.body.amount);
+    res.json({ success: true, data: order });
+  }
+);
+
+// POST /api/wallet/verify — verify Razorpay payment + credit wallet
+router.post('/verify', authenticate,
+  [
+    body('razorpayOrderId').notEmpty(),
+    body('razorpayPaymentId').notEmpty(),
+    body('razorpaySignature').notEmpty(),
+    validate,
+  ],
+  async (req, res) => {
+    const result = await svc.verifyPayment(req.user.id, req.body);
+    // Send push notification
+    try {
+      const notifSvc = require('../notifications/notification.service');
+      await notifSvc.sendToUser(req.user.id, {
+        title: '💰 Wallet Recharged!',
+        body: `₹${result.amount} added. New balance: ₹${result.newBalance.toFixed(2)}`,
+      });
+    } catch {}
+    res.json({ success: true, message: 'Wallet recharged successfully', data: result });
+  }
+);
+
+// GET /api/wallet/transactions — transaction history
+router.get('/transactions', authenticate, async (req, res) => {
+  const txns = await svc.getTransactions(req.user.id, req.query);
+  res.json({ success: true, data: txns });
+});
+
+// POST /api/wallet/gift — send a gift
+router.post('/gift', authenticate,
+  [
+    body('hostId').notEmpty().withMessage('hostId required'),
+    body('giftId').notEmpty().withMessage('giftId required'),
+    validate,
+  ],
+  async (req, res) => {
+    const result = await svc.sendGift(req.user.id, req.body.hostId, req.body.giftId);
+    res.json({ success: true, data: result });
+  }
+);
+
+// GET /api/wallet/gifts — available gifts catalogue
+router.get('/gifts', async (req, res) => {
+  const { query } = require('../../config/database');
+  const { rows } = await query('SELECT * FROM gifts WHERE is_active = TRUE ORDER BY price ASC');
+  res.json({ success: true, data: rows });
+});
+
+module.exports = router;

@@ -1,0 +1,108 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Google Cloud Build — CI/CD Pipeline for SocialCall Backend
+#
+#  Triggers on every push to main branch:
+#    1. Build Docker image
+#    2. Push to Google Artifact Registry
+#    3. Deploy to Cloud Run
+#    4. Run DB migrations
+#
+#  Setup:
+#    gcloud builds submit --config cloudbuild.yaml \
+#      --substitutions _REGION=asia-south1,_SERVICE=socialcall-backend
+# ═══════════════════════════════════════════════════════════════════════
+
+substitutions:
+  _REGION: asia-south1          # Mumbai — closest to India
+  _SERVICE: socialcall-backend
+  _REPO: socialcall
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}
+
+steps:
+
+  # ── Step 1: Build Docker image ────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - --tag
+      - ${_IMAGE}:${SHORT_SHA}
+      - --tag
+      - ${_IMAGE}:latest
+      - --cache-from
+      - ${_IMAGE}:latest
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
+      - .
+    env:
+      - DOCKER_BUILDKIT=1
+
+  # ── Step 2: Push image to Artifact Registry ───────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - ${_IMAGE}
+    waitFor: [build]
+
+  # ── Step 3: Deploy to Cloud Run ───────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --min-instances=0
+      - --max-instances=10
+      - --memory=512Mi
+      - --cpu=1
+      - --timeout=60
+      - --concurrency=80
+      - --port=8080
+      - --set-env-vars=NODE_ENV=production
+      - --update-secrets=DATABASE_URL=SOCIALCALL_DATABASE_URL:latest
+      - --update-secrets=REDIS_URL=SOCIALCALL_REDIS_URL:latest
+      - --update-secrets=JWT_SECRET=SOCIALCALL_JWT_SECRET:latest
+      - --update-secrets=JWT_REFRESH_SECRET=SOCIALCALL_JWT_REFRESH_SECRET:latest
+      - --update-secrets=TWILIO_ACCOUNT_SID=SOCIALCALL_TWILIO_SID:latest
+      - --update-secrets=TWILIO_AUTH_TOKEN=SOCIALCALL_TWILIO_TOKEN:latest
+      - --update-secrets=TWILIO_PHONE_NUMBER=SOCIALCALL_TWILIO_PHONE:latest
+      - --update-secrets=RAZORPAY_KEY_ID=SOCIALCALL_RAZORPAY_KEY_ID:latest
+      - --update-secrets=RAZORPAY_KEY_SECRET=SOCIALCALL_RAZORPAY_SECRET:latest
+      - --set-env-vars=PLATFORM_COMMISSION_PERCENT=35
+      - --set-env-vars=MIN_WALLET_BALANCE=10
+      - --set-env-vars=OTP_EXPIRY_SECONDS=300
+    waitFor: [push]
+
+  # ── Step 4: Run DB migrations after deploy ─────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: migrate
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        SERVICE_URL=$(gcloud run services describe ${_SERVICE} \
+          --region=${_REGION} --format='value(status.url)')
+        echo "✅ Deployed to: $${SERVICE_URL}"
+        echo "🔄 Triggering migrations..."
+        curl -sf "$${SERVICE_URL}/api/admin/migrate" \
+          -H "X-Admin-Key: $$ADMIN_KEY" || echo "⚠️  Migration endpoint not available (run manually)"
+    waitFor: [deploy]
+
+# ── Artifacts ─────────────────────────────────────────────────────────
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+# ── Options ──────────────────────────────────────────────────────────
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1200s

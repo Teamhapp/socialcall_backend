@@ -1,0 +1,106 @@
+{
+  "name": "SocialCall Backend",
+  "description": "Real-time social calling platform API with Socket.IO, PostgreSQL, and Redis",
+  "repository": "https://github.com/YOUR_USERNAME/socialcall-backend",
+  "logo": "https://avatars.githubusercontent.com/u/0",
+  "website": "https://github.com/YOUR_USERNAME/socialcall-backend",
+
+  "env": [
+    {
+      "name": "NODE_ENV",
+      "description": "Runtime environment",
+      "value": "production",
+      "required": true
+    },
+    {
+      "name": "DATABASE_URL",
+      "description": "PostgreSQL connection URL — get from Supabase (Project Settings → Database → URI)",
+      "required": true,
+      "example": "postgresql://postgres:password@db.xxxx.supabase.co:5432/postgres"
+    },
+    {
+      "name": "REDIS_URL",
+      "description": "Redis connection URL — get from Upstash (rediss://default:xxx@xxx.upstash.io:6379)",
+      "required": true,
+      "example": "rediss://default:xxx@brave-unicorn-12345.upstash.io:6379"
+    },
+    {
+      "name": "JWT_SECRET",
+      "description": "Secret key for signing JWT access tokens (auto-generated)",
+      "required": true,
+      "generator": "secret"
+    },
+    {
+      "name": "JWT_REFRESH_SECRET",
+      "description": "Secret key for signing JWT refresh tokens (auto-generated)",
+      "required": true,
+      "generator": "secret"
+    },
+    {
+      "name": "JWT_EXPIRES_IN",
+      "description": "Access token expiry",
+      "value": "7d",
+      "required": false
+    },
+    {
+      "name": "JWT_REFRESH_EXPIRES_IN",
+      "description": "Refresh token expiry",
+      "value": "30d",
+      "required": false
+    },
+    {
+      "name": "TWILIO_ACCOUNT_SID",
+      "description": "Twilio Account SID — from twilio.com/console (free trial available)",
+      "required": true,
+      "example": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "TWILIO_AUTH_TOKEN",
+      "description": "Twilio Auth Token — from twilio.com/console",
+      "required": true,
+      "example": "your_auth_token_here"
+    },
+    {
+      "name": "TWILIO_PHONE_NUMBER",
+      "description": "Twilio phone number for sending OTPs (e.g. +12345678900)",
+      "required": true,
+      "example": "+12345678900"
+    },
+    {
+      "name": "OTP_EXPIRY_SECONDS",
+      "description": "OTP expiry in seconds",
+      "value": "300",
+      "required": false
+    },
+    {
+      "name": "RAZORPAY_KEY_ID",
+      "description": "Razorpay Key ID — from dashboard.razorpay.com (test mode is free)",
+      "required": true,
+      "example": "rzp_test_xxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "RAZORPAY_KEY_SECRET",
+      "description": "Razorpay Key Secret — from dashboard.razorpay.com",
+      "required": true,
+      "example": "your_razorpay_secret"
+    },
+    {
+      "name": "PLATFORM_COMMISSION_PERCENT",
+      "description": "Platform commission percentage taken from host earnings",
+      "value": "35",
+      "required": false
+    },
+    {
+      "name": "MIN_WALLET_BALANCE",
+      "description": "Minimum wallet recharge amount in INR",
+      "value": "10",
+      "required": false
+    },
+    {
+      "name": "MAX_FILE_SIZE_MB",
+      "description": "Max upload file size in MB",
+      "value": "5",
+      "required": false
+    }
+  ]
+}
