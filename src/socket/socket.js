@@ -148,7 +148,6 @@ const initSocket = (io) => {
         io.to(`user:${callerId}`).emit('call_connected', {
           callId,
           channelName: result.channelName,
-          agoraToken: result.agoraToken,
         });
 
         ack?.({ success: true, ...result });
