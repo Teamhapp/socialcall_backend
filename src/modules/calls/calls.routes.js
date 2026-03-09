@@ -62,8 +62,6 @@ router.post('/:callId/accept', authenticate, async (req, res) => {
       io.to(`user:${callerId}`).emit('call_connected', {
         callId: req.params.callId,
         channelName: result.channelName,
-        // agoraToken included but not used by WebRTC client — harmless
-        agoraToken: result.agoraToken,
       });
     }
   }
