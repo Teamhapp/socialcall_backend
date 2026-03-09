@@ -7,8 +7,8 @@ const logger = require('../../config/logger');
 const OTP_TTL = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 minutes
 const IS_DEV  = process.env.NODE_ENV === 'development';
 
-// SMS provider: 'fast2sms' | 'msg91' | 'twilio'  (set SMS_PROVIDER in .env)
-const SMS_PROVIDER = (process.env.SMS_PROVIDER || 'fast2sms').toLowerCase();
+// SMS provider: 'msg91' | 'fast2sms' | 'twilio'  (set SMS_PROVIDER in .env)
+const SMS_PROVIDER = (process.env.SMS_PROVIDER || 'msg91').toLowerCase();
 
 // ─── Generate 6-digit OTP ────────────────────────────────────────────────────
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
