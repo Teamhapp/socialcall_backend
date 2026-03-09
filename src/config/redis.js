@@ -8,7 +8,11 @@ const getRedisClient = async () => {
   redisClient = createClient({
     url: process.env.REDIS_URL || 'redis://localhost:6379',
     socket: {
-      reconnectStrategy: (retries) => Math.min(retries * 100, 3000),
+      connectTimeout: 3000,                              // fail fast if unreachable
+      reconnectStrategy: (retries) => {
+        if (retries >= 3) return new Error('Redis unavailable after max retries');
+        return Math.min(retries * 100, 1000);
+      },
     },
   });
 

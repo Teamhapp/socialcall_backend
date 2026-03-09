@@ -38,13 +38,10 @@ const start = async () => {
     await pool.query('SELECT NOW()');
     logger.info('✅ PostgreSQL connected');
 
-    // Connect Redis (non-blocking if unavailable)
-    try {
-      await getRedisClient();
-      logger.info('✅ Redis connected');
-    } catch (err) {
-      logger.warn('⚠️  Redis unavailable — running without cache', { error: err.message });
-    }
+    // Connect Redis (truly non-blocking — server starts regardless)
+    getRedisClient()
+      .then(() => logger.info('✅ Redis connected'))
+      .catch((err) => logger.warn('⚠️  Redis unavailable — running without cache', { error: err.message }));
 
     httpServer.listen(PORT, () => {
       logger.info(`🚀 Server running on port ${PORT}`, {
