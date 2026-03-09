@@ -1,133 +1,155 @@
-const jwt = require('jsonwebtoken');
+const axios  = require('axios');
+const jwt    = require('jsonwebtoken');
 const crypto = require('crypto');
-const { query, withTransaction } = require('../../config/database');
+const { query } = require('../../config/database');
 const { setex, get, del } = require('../../config/redis');
 const logger = require('../../config/logger');
 
-const OTP_TTL = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 minutes
-const IS_DEV  = process.env.NODE_ENV === 'development';
-
-// SMS provider: 'msg91' | 'fast2sms' | 'twilio'  (set SMS_PROVIDER in .env)
+const OTP_TTL     = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 min
+const IS_DEV      = process.env.NODE_ENV !== 'production';
 const SMS_PROVIDER = (process.env.SMS_PROVIDER || 'msg91').toLowerCase();
 
-// ─── Generate 6-digit OTP ────────────────────────────────────────────────────
-const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const generateOtp  = () => Math.floor(100000 + Math.random() * 900000).toString();
+const mobileE164   = (phone) => phone.replace('+', '');   // "916369983901"
+const mobile10     = (phone) => phone.replace(/^\+91/, '').replace(/\D/g, '');
 
-// ─── Send OTP via Fast2SMS (Cheapest Indian — ₹0.04/SMS) ─────────────────────
+// ─── Rate-limit helper (shared across all providers) ─────────────────────────
+const checkRateLimit = async (phone) => {
+  const attempts = parseInt(await get(`otp_attempts:${phone}`)) || 0;
+  if (attempts >= 3) throw { status: 429, message: 'Too many OTP requests. Try again in 10 minutes.' };
+  await setex(`otp_attempts:${phone}`, 600, String(attempts + 1));
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  MSG91  — lets MSG91 generate + verify OTP natively (no Redis OTP storage)
+// ════════════════════════════════════════════════════════════════════════════════
+const sendViaMSG91 = async (phone) => {
+  // Do NOT send an `otp` field — MSG91 generates its own and manages expiry
+  const res = await axios.post(
+    'https://control.msg91.com/api/v5/otp',
+    {
+      template_id: process.env.MSG91_TEMPLATE_ID,
+      mobile: mobileE164(phone),          // e.g. "916369983901"
+    },
+    {
+      headers: { authkey: process.env.MSG91_AUTH_KEY, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    }
+  );
+  if (res.data.type !== 'success') throw new Error(res.data.message || 'MSG91 send failed');
+};
+
+const verifyViaMSG91 = async (phone, otp) => {
+  // MSG91 verifies against its own stored OTP
+  const res = await axios.get(
+    'https://control.msg91.com/api/v5/otp/verify',
+    {
+      params: { otp, mobile: mobileE164(phone) },
+      headers: { authkey: process.env.MSG91_AUTH_KEY },
+      timeout: 10000,
+    }
+  );
+  if (res.data.type !== 'success') throw { status: 400, message: 'Invalid OTP' };
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  Fast2SMS  — we generate OTP, store in Redis, verify ourselves
+// ════════════════════════════════════════════════════════════════════════════════
 const sendViaFast2SMS = async (phone, otp) => {
-  const axios = require('axios');
-  // Remove country code — Fast2SMS needs 10-digit number
-  const mobile = phone.replace(/^\+91/, '').replace(/\D/g, '');
   const res = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
     params: {
       authorization: process.env.FAST2SMS_API_KEY,
       variables_values: otp,
       route: 'otp',
-      numbers: mobile,
+      numbers: mobile10(phone),
     },
     timeout: 10000,
   });
   if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS failed');
 };
 
-// ─── Send OTP via MSG91 (Most Popular Indian — ₹0.18/SMS) ────────────────────
-const sendViaMSG91 = async (phone, otp) => {
-  const axios = require('axios');
-  // MSG91 needs country code without +
-  const mobile = phone.replace('+', '');
-  const res = await axios.post(
-    'https://control.msg91.com/api/v5/otp',
-    {
-      template_id: process.env.MSG91_TEMPLATE_ID,
-      mobile,
-      otp,
-    },
-    {
-      headers: {
-        authkey: process.env.MSG91_AUTH_KEY,
-        'Content-Type': 'application/json',
-      },
-      timeout: 10000,
-    }
-  );
-  if (res.data.type !== 'success') throw new Error(res.data.message || 'MSG91 failed');
-};
-
-// ─── Send OTP via Twilio (International — $0.10/SMS) ─────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+//  Twilio  — we generate OTP, store in Redis, verify ourselves
+// ════════════════════════════════════════════════════════════════════════════════
 const sendViaTwilio = async (phone, otp) => {
-  const twilio = require('twilio')(
-    process.env.TWILIO_ACCOUNT_SID,
-    process.env.TWILIO_AUTH_TOKEN
-  );
+  const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   await twilio.messages.create({
-    body: `Your SocialCall OTP is: ${otp}. Valid for 5 minutes. Do not share.`,
+    body: `Your SocialCall OTP is ${otp}. Valid for 5 minutes. Do not share.`,
     from: process.env.TWILIO_PHONE_NUMBER,
     to: phone,
   });
 };
 
-// ─── Main sendOtp function ────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+//  sendOtp  — public entry point
+// ════════════════════════════════════════════════════════════════════════════════
 const sendOtp = async (phone) => {
-  const otp = generateOtp();
-  const key = `otp:${phone}`;
+  // Rate limit (all providers)
+  await checkRateLimit(phone);
 
-  // Rate limit: max 3 OTPs per 10 minutes
-  const attempts = await get(`otp_attempts:${phone}`) || 0;
-  if (attempts >= 3) throw { status: 429, message: 'Too many OTP requests. Try again in 10 minutes.' };
-
-  await setex(key, OTP_TTL, otp);
-  await setex(`otp_attempts:${phone}`, 600, String(parseInt(attempts) + 1));
-
-  // Development: just log to console — no SMS sent
+  // ── Development mode: skip SMS, log OTP ────────────────────────────────────
   if (IS_DEV) {
+    const otp = generateOtp();
+    await setex(`otp:${phone}`, OTP_TTL, otp);
     logger.info(`[DEV OTP] ${phone} → ${otp}`);
-    return { message: `OTP sent (dev: ${otp})`, otp };
+    return { message: 'OTP sent successfully' };
   }
 
-  // Production: send via selected provider
+  // ── Production ──────────────────────────────────────────────────────────────
   try {
-    if (SMS_PROVIDER === 'fast2sms') {
-      await sendViaFast2SMS(phone, otp);
-    } else if (SMS_PROVIDER === 'msg91') {
-      await sendViaMSG91(phone, otp);
+    if (SMS_PROVIDER === 'msg91') {
+      // MSG91 stores OTP internally — nothing to write to Redis
+      await sendViaMSG91(phone);
     } else {
-      await sendViaTwilio(phone, otp);
+      // Other providers: we manage the OTP in Redis
+      const otp = generateOtp();
+      await setex(`otp:${phone}`, OTP_TTL, otp);
+      if (SMS_PROVIDER === 'fast2sms') await sendViaFast2SMS(phone, otp);
+      else                             await sendViaTwilio(phone, otp);
     }
     logger.info(`OTP sent via ${SMS_PROVIDER}`, { phone });
   } catch (err) {
-    logger.error(`${SMS_PROVIDER} OTP error`, { phone, error: err.message });
+    logger.error(`${SMS_PROVIDER} OTP send error`, { phone, error: err.message });
     throw { status: 503, message: 'Failed to send OTP. Please try again.' };
   }
 
   return { message: 'OTP sent successfully' };
 };
 
-// ─── Verify OTP and login/register ───────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+//  verifyOtp  — public entry point
+// ════════════════════════════════════════════════════════════════════════════════
 const verifyOtp = async (phone, otp) => {
-  const key = `otp:${phone}`;
-  const storedOtp = await get(key);
+  // ── MSG91 in production: delegate verification to MSG91 ────────────────────
+  if (SMS_PROVIDER === 'msg91' && !IS_DEV) {
+    try {
+      await verifyViaMSG91(phone, otp);
+    } catch (err) {
+      throw err.status ? err : { status: 400, message: 'Invalid OTP' };
+    }
+  } else {
+    // ── Dev mode + other providers: verify against Redis ─────────────────────
+    const storedOtp = await get(`otp:${phone}`);
+    if (!storedOtp) throw { status: 400, message: 'OTP expired or not found. Request a new one.' };
+    if (String(storedOtp) !== String(otp)) throw { status: 400, message: 'Invalid OTP' };
+    await del(`otp:${phone}`);
+  }
 
-  if (!storedOtp) throw { status: 400, message: 'OTP expired or not found. Request a new one.' };
-  if (String(storedOtp) !== String(otp)) throw { status: 400, message: 'Invalid OTP' };
-
-  // OTP consumed — delete it
-  await del(key);
+  // Clear rate limit on success
   await del(`otp_attempts:${phone}`);
 
-  // Find or create user
-  let user;
+  // ── Find or create user ────────────────────────────────────────────────────
   const existing = await query('SELECT * FROM users WHERE phone = $1', [phone]);
+  let user;
 
   if (existing.rows[0]) {
     user = existing.rows[0];
-    // Update last seen
     await query('UPDATE users SET last_seen_at = NOW() WHERE id = $1', [user.id]);
   } else {
-    // New user registration
     const { rows } = await query(
       `INSERT INTO users (phone, name, last_seen_at)
-       VALUES ($1, $2, NOW())
-       RETURNING *`,
+       VALUES ($1, $2, NOW()) RETURNING *`,
       [phone, `User${phone.slice(-4)}`]
     );
     user = rows[0];
@@ -144,24 +166,20 @@ const verifyOtp = async (phone, otp) => {
   };
 };
 
-// ─── Token generation ─────────────────────────────────────────────────────────
-const generateTokens = (userId) => {
-  const accessToken = jwt.sign(
-    { userId },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-  );
-  const refreshToken = crypto.randomBytes(64).toString('hex');
-  return { accessToken, refreshToken };
-};
+// ─── Token helpers ────────────────────────────────────────────────────────────
+const generateTokens = (userId) => ({
+  accessToken: jwt.sign({ userId }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  }),
+  refreshToken: crypto.randomBytes(64).toString('hex'),
+});
 
 const saveRefreshToken = async (userId, token) => {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 30);
   await query(
     `INSERT INTO refresh_tokens (user_id, token, expires_at)
-     VALUES ($1, $2, $3)
-     ON CONFLICT DO NOTHING`,
+     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
     [userId, token, expiresAt]
   );
 };
@@ -174,18 +192,15 @@ const refreshAccessToken = async (refreshToken) => {
      WHERE rt.token = $1 AND rt.expires_at > NOW()`,
     [refreshToken]
   );
-
   if (!rows[0]) throw { status: 401, message: 'Invalid or expired refresh token' };
 
   const newTokens = generateTokens(rows[0].user_id);
-  // Rotate refresh token
   await query('DELETE FROM refresh_tokens WHERE token = $1', [refreshToken]);
   await saveRefreshToken(rows[0].user_id, newTokens.refreshToken);
-
   return newTokens;
 };
 
-// ─── Logout ──────────────────────────────────────────────────────────────────
+// ─── Logout ───────────────────────────────────────────────────────────────────
 const logout = async (userId, refreshToken) => {
   if (refreshToken) {
     await query('DELETE FROM refresh_tokens WHERE user_id = $1 AND token = $2', [userId, refreshToken]);
@@ -194,14 +209,14 @@ const logout = async (userId, refreshToken) => {
   }
 };
 
-// ─── Sanitize user for response ───────────────────────────────────────────────
+// ─── Sanitize user ────────────────────────────────────────────────────────────
 const sanitizeUser = (user) => ({
-  id: user.id,
-  name: user.name,
-  phone: user.phone,
-  avatar: user.avatar,
+  id:            user.id,
+  name:          user.name,
+  phone:         user.phone,
+  avatar:        user.avatar,
   walletBalance: parseFloat(user.wallet_balance),
-  isHost: user.is_host,
+  isHost:        user.is_host,
 });
 
 module.exports = { sendOtp, verifyOtp, refreshAccessToken, logout, sanitizeUser };

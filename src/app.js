@@ -67,13 +67,19 @@ app.use('/api/auth/', authLimiter);
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    status: 'healthy',
-    env: process.env.NODE_ENV,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const { pool } = require('./config/database');
+    await pool.query('SELECT 1');
+    res.json({
+      success: true,
+      status: 'healthy',
+      env: process.env.NODE_ENV,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(503).json({ success: false, status: 'unhealthy', error: err.message });
+  }
 });
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
