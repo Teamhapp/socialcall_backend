@@ -21,6 +21,9 @@ const walletRoutes = require('./modules/wallet/wallet.routes');
 
 const app = express();
 
+// ─── Trust Replit / reverse-proxy headers ─────────────────────────────────────
+app.set('trust proxy', 1);
+
 // ─── Security & Middleware ────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
