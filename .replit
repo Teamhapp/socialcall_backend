@@ -5,7 +5,6 @@ entrypoint = "server.js"
 channel = "stable-24_05"
 
 [deployment]
-run = ["sh", "-c", "node server.js"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
