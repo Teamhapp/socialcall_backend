@@ -91,7 +91,7 @@ const migrate = async () => {
     // ── Gifts ────────────────────────────────────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS gifts (
-        id         BIGSERIAL PRIMARY KEY,
+        id         INTEGER PRIMARY KEY,
         name       VARCHAR(50) NOT NULL,
         emoji      VARCHAR(10) NOT NULL,
         price      DECIMAL(8,2) NOT NULL,

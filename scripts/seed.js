@@ -13,16 +13,16 @@ const seed = async () => {
 
     // ── Gifts ────────────────────────────────────────────────────────────────
     await client.query(`
-      INSERT INTO gifts (name, emoji, price) VALUES
-        ('Rose',        '🌹',  10),
-        ('Heart',       '❤️',  20),
-        ('Star',        '⭐',  30),
-        ('Fire',        '🔥',  50),
-        ('Diamond',     '💎', 100),
-        ('Crown',       '👑', 200),
-        ('Rocket',      '🚀', 500),
-        ('Trophy',      '🏆', 999)
-      ON CONFLICT DO NOTHING;
+      INSERT INTO gifts (id, name, emoji, price) VALUES
+        (1, 'Rose',    '🌹',   10),
+        (2, 'Heart',   '❤️',  20),
+        (3, 'Star',    '⭐',   30),
+        (4, 'Fire',    '🔥',   50),
+        (5, 'Diamond', '💎',  100),
+        (6, 'Crown',   '👑',  200),
+        (7, 'Rocket',  '🚀',  500),
+        (8, 'Trophy',  '🏆',  999)
+      ON CONFLICT (id) DO NOTHING;
     `);
     console.log('  ✅ gifts seeded');
 
