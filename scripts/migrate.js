@@ -20,11 +20,16 @@ const migrate = async () => {
         avatar          TEXT,
         wallet_balance  DECIMAL(12,2) NOT NULL DEFAULT 0,
         is_host         BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active       BOOLEAN NOT NULL DEFAULT TRUE,
         fcm_token       TEXT,
+        password_hash   TEXT,
         last_seen_at    TIMESTAMPTZ DEFAULT NOW(),
         created_at      TIMESTAMPTZ DEFAULT NOW()
       );
     `);
+    // Add columns for existing databases (safe no-op if already present)
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;`);
     console.log('  ✅ users');
 
     // ── Hosts ────────────────────────────────────────────────────────────────

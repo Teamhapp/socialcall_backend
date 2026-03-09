@@ -1,13 +1,15 @@
-const axios  = require('axios');
-const jwt    = require('jsonwebtoken');
-const crypto = require('crypto');
+const axios   = require('axios');
+const jwt     = require('jsonwebtoken');
+const crypto  = require('crypto');
+const bcrypt  = require('bcryptjs');
 const { query } = require('../../config/database');
 const { setex, get, del } = require('../../config/redis');
 const logger = require('../../config/logger');
 
-const OTP_TTL     = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 min
-const IS_DEV      = process.env.NODE_ENV !== 'production';
+const OTP_TTL      = parseInt(process.env.OTP_EXPIRY_SECONDS) || 300; // 5 min
+const IS_DEV       = process.env.NODE_ENV !== 'production';
 const SMS_PROVIDER = (process.env.SMS_PROVIDER || 'msg91').toLowerCase();
+const BCRYPT_ROUNDS = 10;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const generateOtp  = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -92,7 +94,7 @@ const sendOtp = async (phone) => {
   if (IS_DEV) {
     const otp = generateOtp();
     await setex(`otp:${phone}`, OTP_TTL, otp);
-    logger.info(`[DEV OTP] ${phone} → ${otp}`);
+    logger.info(`[DEV OTP] ${phone} → ${otp} (NODE_ENV=${process.env.NODE_ENV})`);
     return { message: 'OTP sent successfully' };
   }
 
@@ -153,7 +155,7 @@ const verifyOtp = async (phone, otp) => {
       [phone, `User${phone.slice(-4)}`]
     );
     user = rows[0];
-    logger.info('New user registered', { userId: user.id, phone });
+    logger.info('New user registered via OTP', { userId: user.id, phone });
   }
 
   const tokens = generateTokens(user.id);
@@ -164,6 +166,87 @@ const verifyOtp = async (phone, otp) => {
     ...tokens,
     isNewUser: !existing.rows[0],
   };
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  registerWithPassword  — create account with phone + password (no OTP needed)
+// ════════════════════════════════════════════════════════════════════════════════
+const registerWithPassword = async (phone, password, name) => {
+  const existing = await query('SELECT id, password_hash FROM users WHERE phone = $1', [phone]);
+
+  if (existing.rows[0]) {
+    if (existing.rows[0].password_hash) {
+      throw { status: 409, message: 'Phone number already registered. Please login.' };
+    }
+    // User exists (via OTP) but has no password yet — just add the password
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, existing.rows[0].id]);
+    const { rows } = await query('SELECT * FROM users WHERE id = $1', [existing.rows[0].id]);
+    const user = rows[0];
+    const tokens = generateTokens(user.id);
+    await saveRefreshToken(user.id, tokens.refreshToken);
+    return { user: sanitizeUser(user), ...tokens, isNewUser: false };
+  }
+
+  // Brand new user — create with password
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const { rows } = await query(
+    `INSERT INTO users (phone, name, password_hash, last_seen_at)
+     VALUES ($1, $2, $3, NOW()) RETURNING *`,
+    [phone, name || `User${phone.slice(-4)}`, passwordHash]
+  );
+  const user = rows[0];
+  logger.info('New user registered via password', { userId: user.id, phone });
+
+  const tokens = generateTokens(user.id);
+  await saveRefreshToken(user.id, tokens.refreshToken);
+
+  return { user: sanitizeUser(user), ...tokens, isNewUser: true };
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  loginWithPassword  — sign in with phone + password
+// ════════════════════════════════════════════════════════════════════════════════
+const loginWithPassword = async (phone, password) => {
+  const { rows } = await query('SELECT * FROM users WHERE phone = $1', [phone]);
+  const user = rows[0];
+
+  if (!user) throw { status: 401, message: 'Invalid phone number or password' };
+  if (!user.password_hash) throw { status: 400, message: 'This account uses OTP login. Please use the OTP option to sign in.' };
+  if (!user.is_active) throw { status: 403, message: 'Account is deactivated. Contact support.' };
+
+  const isMatch = await bcrypt.compare(password, user.password_hash);
+  if (!isMatch) throw { status: 401, message: 'Invalid phone number or password' };
+
+  await query('UPDATE users SET last_seen_at = NOW() WHERE id = $1', [user.id]);
+  logger.info('User logged in via password', { userId: user.id, phone });
+
+  const tokens = generateTokens(user.id);
+  await saveRefreshToken(user.id, tokens.refreshToken);
+
+  return { user: sanitizeUser(user), ...tokens, isNewUser: false };
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  setPassword  — set or change password for an authenticated user
+// ════════════════════════════════════════════════════════════════════════════════
+const setPassword = async (userId, newPassword, currentPassword = null) => {
+  const { rows } = await query('SELECT id, password_hash FROM users WHERE id = $1', [userId]);
+  const user = rows[0];
+  if (!user) throw { status: 404, message: 'User not found' };
+
+  // If user already has a password, verify the current one first
+  if (user.password_hash) {
+    if (!currentPassword) throw { status: 400, message: 'Current password is required to change password' };
+    const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isMatch) throw { status: 401, message: 'Current password is incorrect' };
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+  logger.info('Password updated', { userId });
+
+  return { message: user.password_hash ? 'Password changed successfully' : 'Password set successfully' };
 };
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
@@ -217,6 +300,16 @@ const sanitizeUser = (user) => ({
   avatar:        user.avatar,
   walletBalance: parseFloat(user.wallet_balance),
   isHost:        user.is_host,
+  hasPassword:   !!user.password_hash,   // tells client if password login is available
 });
 
-module.exports = { sendOtp, verifyOtp, refreshAccessToken, logout, sanitizeUser };
+module.exports = {
+  sendOtp,
+  verifyOtp,
+  registerWithPassword,
+  loginWithPassword,
+  setPassword,
+  refreshAccessToken,
+  logout,
+  sanitizeUser,
+};
