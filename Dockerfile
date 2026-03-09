@@ -39,7 +39,7 @@ EXPOSE 8080
 
 # Health check (Cloud Run uses this)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:${PORT:-8080}/api/health || exit 1
+  CMD wget -qO- http://localhost:${PORT:-8080}/health || exit 1
 
 # Start the server
 CMD ["node", "server.js"]
