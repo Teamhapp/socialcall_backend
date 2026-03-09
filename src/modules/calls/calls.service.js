@@ -5,26 +5,6 @@ const logger = require('../../config/logger');
 
 const COMMISSION = parseInt(process.env.PLATFORM_COMMISSION_PERCENT) || 35;
 
-// ─── Generate Agora Token ─────────────────────────────────────────────────────
-const generateAgoraToken = (channelName, userId) => {
-  try {
-    const { RtcTokenBuilder, RtcRole } = require('agora-token');
-    const expiry = Math.floor(Date.now() / 1000) + (parseInt(process.env.AGORA_TOKEN_EXPIRY) || 3600);
-    return RtcTokenBuilder.buildTokenWithUserAccount(
-      process.env.AGORA_APP_ID,
-      process.env.AGORA_APP_CERTIFICATE,
-      channelName,
-      userId,
-      RtcRole.PUBLISHER,
-      expiry,
-      expiry
-    );
-  } catch {
-    // Dev fallback if Agora not configured
-    return `dev_token_${channelName}_${userId}`;
-  }
-};
-
 // ─── Initiate Call ─────────────────────────────────────────────────────────────
 const initiateCall = async (userId, hostId, callType) => {
   return withTransaction(async (client) => {
@@ -75,14 +55,9 @@ const initiateCall = async (userId, hostId, callType) => {
       startedAt: null,
     });
 
-    // Generate Agora token
-    const agoraToken = generateAgoraToken(channelName, userId);
-
     return {
       callId: call.id,
       channelName,
-      agoraToken,
-      agoraAppId: process.env.AGORA_APP_ID,
       callType,
       ratePerMin: parseFloat(ratePerMin),
       host: { id: host.id, name: host.name, fcmToken: host.fcm_token },
@@ -108,8 +83,7 @@ const acceptCall = async (callId, hostUserId) => {
     await setex(`call:${call.id}`, 7200, { ...cached, startedAt: new Date().toISOString() });
   }
 
-  const agoraToken = generateAgoraToken(call.channel_name, hostUserId);
-  return { callId, channelName: call.channel_name, agoraToken, agoraAppId: process.env.AGORA_APP_ID };
+  return { callId, channelName: call.channel_name };
 };
 
 // ─── End Call + Billing ───────────────────────────────────────────────────────
@@ -228,4 +202,4 @@ const submitReview = async (callId, userId, { rating, comment }) => {
   });
 };
 
-module.exports = { initiateCall, acceptCall, endCall, getCallHistory, submitReview, generateAgoraToken };
+module.exports = { initiateCall, acceptCall, endCall, getCallHistory, submitReview };
