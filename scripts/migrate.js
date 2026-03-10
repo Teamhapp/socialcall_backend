@@ -104,6 +104,17 @@ const migrate = async () => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
+    // Seed default gifts (safe no-op if already present)
+    await client.query(`
+      INSERT INTO gifts (id, name, emoji, price) VALUES
+        (1, 'Rose',    '🌹',  10.00),
+        (2, 'Heart',   '❤️',  20.00),
+        (3, 'Cake',    '🎂',  50.00),
+        (4, 'Music',   '🎵',  30.00),
+        (5, 'Trophy',  '🏆', 200.00),
+        (6, 'Diamond', '💎', 500.00)
+      ON CONFLICT (id) DO NOTHING;
+    `);
     console.log('  ✅ gifts');
 
     // ── Messages ─────────────────────────────────────────────────────────────
@@ -184,6 +195,32 @@ const migrate = async () => {
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_followers_host ON followers(host_id);`);
     console.log('  ✅ followers');
+
+    // ── Payouts ──────────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS payouts (
+        id            BIGSERIAL PRIMARY KEY,
+        host_id       BIGINT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        amount        DECIMAL(12,2) NOT NULL,
+        status        VARCHAR(20) NOT NULL DEFAULT 'pending',
+        upi_id        VARCHAR(200),
+        bank_account  VARCHAR(200),
+        reference_id  VARCHAR(200),
+        notes         TEXT,
+        requested_at  TIMESTAMPTZ DEFAULT NOW(),
+        processed_at  TIMESTAMPTZ
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_payouts_host ON payouts(host_id);`);
+    console.log('  ✅ payouts');
+
+    // ── Indexes for performance ───────────────────────────────────────────────
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_is_online ON hosts(is_online);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_rating ON hosts(rating DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);`);
+    console.log('  ✅ indexes');
 
     await client.query('COMMIT');
     console.log('\n✅ All migrations completed successfully!\n');

@@ -12,6 +12,16 @@ const path = require('path');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 const logger = require('./config/logger');
 
+// ─── Critical ENV validation ──────────────────────────────────────────────────
+// Fail fast with clear message rather than cryptic runtime errors
+const REQUIRED_ENV = ['JWT_SECRET', 'JWT_REFRESH_SECRET'];
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length) {
+  console.error(`\n❌ MISSING REQUIRED ENV VARS: ${missing.join(', ')}\n`);
+  console.error('Set these in Replit Secrets (padlock icon) or .env file.\n');
+  process.exit(1);
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 const authRoutes   = require('./modules/auth/auth.routes');
 const hostsRoutes  = require('./modules/hosts/hosts.routes');
@@ -21,14 +31,20 @@ const walletRoutes = require('./modules/wallet/wallet.routes');
 
 const app = express();
 
-// ─── Trust Replit / reverse-proxy headers ─────────────────────────────────────
+// ─── Trust Replit / Cloud Run reverse-proxy headers ───────────────────────────
 app.set('trust proxy', 1);
 
 // ─── Security & Middleware ────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
+// CORS: mobile apps don't send Origin headers so '*' is safe and required.
+// For web dashboards, set ALLOWED_ORIGINS in Secrets.
+const corsOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+  : true; // true = reflect all origins (required for mobile apps)
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
+  origin: corsOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -101,7 +117,7 @@ app.post('/api/users/fcm-token',
   }
 );
 
-// User profile
+// User profile — GET
 app.get('/api/users/profile', require('./middleware/auth').authenticate, async (req, res) => {
   const { query } = require('./config/database');
   const { rows } = await query(`
@@ -110,6 +126,24 @@ app.get('/api/users/profile', require('./middleware/auth').authenticate, async (
     FROM users u LEFT JOIN hosts h ON h.user_id = u.id
     WHERE u.id = $1
   `, [req.user.id]);
+  res.json({ success: true, data: rows[0] });
+});
+
+// User profile — PATCH (update name / avatar)
+app.patch('/api/users/profile', require('./middleware/auth').authenticate, async (req, res) => {
+  const { query } = require('./config/database');
+  const { name, avatar } = req.body;
+  const fields = [];
+  const values = [];
+  let idx = 1;
+  if (name)   { fields.push(`name   = $${idx++}`); values.push(name.trim()); }
+  if (avatar) { fields.push(`avatar = $${idx++}`); values.push(avatar); }
+  if (!fields.length) return res.status(400).json({ success: false, message: 'Nothing to update' });
+  values.push(req.user.id);
+  const { rows } = await query(
+    `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, name, avatar, phone, wallet_balance, is_host`,
+    values
+  );
   res.json({ success: true, data: rows[0] });
 });
 
