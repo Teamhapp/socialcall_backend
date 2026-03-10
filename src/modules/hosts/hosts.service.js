@@ -207,6 +207,24 @@ const toggleFollow = async (userId, hostId) => {
   }
 };
 
+// ─── Get hosts followed by a user ────────────────────────────────────────────
+const getFollowing = async (userId) => {
+  const { rows } = await query(`
+    SELECT
+      h.id, h.user_id, h.bio, h.languages, h.tags,
+      h.audio_rate_per_min, h.video_rate_per_min,
+      h.rating, h.total_reviews, h.total_calls,
+      h.is_online, h.is_verified, h.followers_count,
+      u.name, u.avatar
+    FROM followers f
+    JOIN hosts h ON h.id = f.host_id
+    JOIN users u ON u.id = h.user_id
+    WHERE f.user_id = $1 AND h.is_active = TRUE
+    ORDER BY h.is_online DESC, h.rating DESC
+  `, [userId]);
+  return rows;
+};
+
 // ─── Update host rating after review ─────────────────────────────────────────
 const updateHostRating = async (hostId) => {
   await query(`
@@ -220,5 +238,5 @@ const updateHostRating = async (hostId) => {
 module.exports = {
   getHosts, getHostById, getHostByUserId,
   createHostProfile, updateHostProfile,
-  setOnlineStatus, toggleFollow, updateHostRating,
+  setOnlineStatus, toggleFollow, updateHostRating, getFollowing,
 };

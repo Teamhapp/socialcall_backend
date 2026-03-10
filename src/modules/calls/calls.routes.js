@@ -75,9 +75,15 @@ router.post('/:callId/end', authenticate, async (req, res) => {
   res.json({ success: true, data: result });
 });
 
-// GET /api/calls/history
+// GET /api/calls/history — caller's outgoing call history
 router.get('/history', authenticate, async (req, res) => {
   const calls = await svc.getCallHistory(req.user.id, req.query);
+  res.json({ success: true, data: calls });
+});
+
+// GET /api/calls/history/host — host's incoming call history
+router.get('/history/host', authenticate, async (req, res) => {
+  const calls = await svc.getHostCallHistory(req.user.id, req.query);
   res.json({ success: true, data: calls });
 });
 

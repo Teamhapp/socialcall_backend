@@ -9,6 +9,66 @@ const logger = require('../config/logger');
 // Track online users: userId → socketId
 const onlineUsers = new Map();
 
+// ─── Per-call server-side wallet watch ───────────────────────────────────────
+// Prevents calls from running past wallet balance even if Flutter client dies.
+const callCheckIntervals = new Map();
+
+function startWalletCheck(io, callId, callerId, ratePerMin) {
+  if (callCheckIntervals.has(callId)) return;
+  const startedAt = Date.now();
+  const intervalId = setInterval(async () => {
+    try {
+      const { rows } = await query(
+        'SELECT wallet_balance FROM users WHERE id = $1', [callerId]
+      );
+      const balance    = parseFloat(rows[0]?.wallet_balance || 0);
+      const elapsedMin = (Date.now() - startedAt) / 60000;
+      const cost       = elapsedMin * ratePerMin;
+      const remaining  = balance - cost;
+      const minsLeft   = remaining / ratePerMin;
+
+      if (minsLeft <= 0) {
+        // Wallet depleted — force-end the call
+        clearInterval(intervalId);
+        callCheckIntervals.delete(callId);
+        try {
+          const result = await callsService.endCall(callId, callerId);
+          const callRes = await query(
+            'SELECT user_id, host_id FROM calls WHERE id = $1', [callId]
+          );
+          const call = callRes.rows[0];
+          if (call) {
+            const hostRes = await query(
+              'SELECT user_id FROM hosts WHERE id = $1', [call.host_id]
+            );
+            const hostUserId = hostRes.rows[0]?.user_id;
+            io.to(`user:${call.user_id}`).to(`user:${hostUserId}`)
+              .emit('call_summary', { callId, ...result, autoEnded: true });
+          }
+        } catch (err) {
+          logger.error('Auto-end call failed', { callId, err: err.message });
+        }
+      } else if (minsLeft < 1) {
+        // Under 1 minute left — warn the caller
+        io.to(`user:${callerId}`).emit('wallet_low_warning', {
+          callId, minsLeft: minsLeft.toFixed(1),
+        });
+      }
+    } catch (err) {
+      logger.error('Wallet check error', { callId, err: err.message });
+    }
+  }, 30000); // check every 30 s
+  callCheckIntervals.set(callId, { intervalId, callerId, ratePerMin, startedAt });
+}
+
+function stopWalletCheck(callId) {
+  const entry = callCheckIntervals.get(callId);
+  if (entry) {
+    clearInterval(entry.intervalId);
+    callCheckIntervals.delete(callId);
+  }
+}
+
 // Batch last_seen updates — flush every 30s instead of on every event
 const _lastSeenPending = new Set();
 setInterval(() => {
@@ -150,6 +210,12 @@ const initSocket = (io) => {
           channelName: result.channelName,
         });
 
+        // Start server-side wallet watch — auto-ends call if balance runs out
+        const cached = await get(`call:${callId}`);
+        if (cached?.ratePerMin && callerId) {
+          startWalletCheck(io, callId, callerId, cached.ratePerMin);
+        }
+
         ack?.({ success: true, ...result });
       } catch (err) {
         ack?.({ error: err.message });
@@ -169,6 +235,8 @@ const initSocket = (io) => {
     socket.on('call_ended', async (data, ack) => {
       try {
         const { callId } = data;
+        stopWalletCheck(callId); // cancel server-side wallet interval
+
         const result = await callsService.endCall(callId, userId);
 
         // Notify both parties
@@ -181,6 +249,11 @@ const initSocket = (io) => {
             callId,
             ...result,
           });
+          // If call was never connected (ring-timeout / cancelled before answer)
+          // tell the host so their incoming-call overlay dismisses.
+          if (result.durationSeconds === 0 && hostUserId) {
+            io.to(`user:${hostUserId}`).emit('call_cancelled', { callId });
+          }
         }
 
         ack?.({ success: true, ...result });
@@ -233,6 +306,11 @@ const initSocket = (io) => {
       if (socket.isHost) {
         query('UPDATE hosts SET is_online = FALSE WHERE user_id = $1', [userId]).catch(() => {});
         socket.broadcast.emit('host_offline', { userId });
+      }
+
+      // Clean up any active wallet checks where this user was the caller
+      for (const [cid, entry] of callCheckIntervals.entries()) {
+        if (entry.callerId === userId) stopWalletCheck(cid);
       }
 
       logger.info('Socket disconnected', { userId, socketId: socket.id });

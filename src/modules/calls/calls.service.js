@@ -180,6 +180,21 @@ const getCallHistory = async (userId, { page = 1, limit = 20 }) => {
   return rows;
 };
 
+// ─── Get Call History for a Host (calls they received) ───────────────────────
+const getHostCallHistory = async (hostUserId, { page = 1, limit = 20 }) => {
+  const offset = (page - 1) * limit;
+  const { rows } = await query(`
+    SELECT c.*, u.name AS caller_name, u.avatar AS caller_avatar
+    FROM calls c
+    JOIN hosts h ON h.id = c.host_id
+    JOIN users u ON u.id = c.user_id
+    WHERE h.user_id = $1 AND c.status = 'ended'
+    ORDER BY c.created_at DESC
+    LIMIT $2 OFFSET $3
+  `, [hostUserId, limit, offset]);
+  return rows;
+};
+
 // ─── Submit Review ────────────────────────────────────────────────────────────
 const submitReview = async (callId, userId, { rating, comment }) => {
   return withTransaction(async (client) => {
@@ -202,4 +217,4 @@ const submitReview = async (callId, userId, { rating, comment }) => {
   });
 };
 
-module.exports = { initiateCall, acceptCall, endCall, getCallHistory, submitReview };
+module.exports = { initiateCall, acceptCall, endCall, getCallHistory, getHostCallHistory, submitReview };

@@ -10,6 +10,19 @@ router.get('/', optionalAuth, async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+// GET /api/hosts/me — own host profile + earnings (hosts only)
+router.get('/me', authenticate, requireHost, async (req, res) => {
+  const host = await svc.getHostByUserId(req.user.id);
+  if (!host) return res.status(404).json({ success: false, message: 'Host profile not found' });
+  res.json({ success: true, data: host });
+});
+
+// GET /api/hosts/following — hosts the current user follows
+router.get('/following', authenticate, async (req, res) => {
+  const hosts = await svc.getFollowing(req.user.id);
+  res.json({ success: true, data: hosts });
+});
+
 // GET /api/hosts/:id — single host profile
 router.get('/:id', optionalAuth, async (req, res) => {
   const host = await svc.getHostById(req.params.id, req.user?.id);
