@@ -60,6 +60,17 @@ const start = async () => {
     });
   } catch (err) {
     logger.error('❌ Startup failed', { error: err.message });
+
+    // Print actionable fix hints for the most common Replit deployment errors
+    if (err.message?.includes('ECONNREFUSED') || err.message?.includes('connect')) {
+      console.error('\n🔴 DATABASE CONNECTION FAILED');
+      console.error('Fix: Set DATABASE_URL in Replit Secrets (padlock icon → Secrets tab)');
+      console.error('Format: postgresql://user:pass@host:5432/dbname?sslmode=require\n');
+    }
+    if (err.message?.includes('password authentication') || err.message?.includes('role')) {
+      console.error('\n🔴 DATABASE CREDENTIALS WRONG');
+      console.error('Fix: Check DATABASE_URL value in Replit Secrets\n');
+    }
     process.exit(1);
   }
 };
