@@ -44,20 +44,23 @@ router.post('/api/login', (req, res) => {
 
 // ── Dashboard Stats ───────────────────────────────────────────────────────────
 router.get('/api/stats', adminAuth, async (req, res) => {
-  const { rows } = await query(`
-    SELECT
-      (SELECT COUNT(*)                        FROM users  WHERE is_active = TRUE)                                   AS total_users,
-      (SELECT COUNT(*)                        FROM hosts  WHERE is_online = TRUE)                                   AS hosts_online,
-      (SELECT COUNT(*)                        FROM hosts  WHERE is_active = TRUE)                                   AS total_hosts,
-      (SELECT COUNT(*)                        FROM calls  WHERE DATE(created_at) = CURRENT_DATE)                   AS calls_today,
-      (SELECT COALESCE(SUM(amount_charged),0) FROM calls  WHERE DATE(created_at) = CURRENT_DATE AND status='ended') AS revenue_today,
-      (SELECT COUNT(*)                        FROM calls  WHERE status = 'ended')                                   AS total_calls,
-      (SELECT COALESCE(SUM(amount_charged),0) FROM calls  WHERE status = 'ended')                                   AS total_revenue,
-      (SELECT COUNT(*)                        FROM payouts WHERE status = 'pending')                               AS pending_payouts,
-      (SELECT COUNT(*)                        FROM hosts  WHERE is_verified = FALSE AND is_active = TRUE)          AS unverified_hosts,
-      (SELECT COUNT(*)                        FROM promo_codes WHERE is_active = TRUE)                             AS active_promos
-  `);
-  res.json({ success: true, data: rows[0] });
+  // Run core stats + promo count separately to gracefully handle pre-migration state
+  const [coreRes, promoRes] = await Promise.all([
+    query(`
+      SELECT
+        (SELECT COUNT(*)                        FROM users  WHERE is_active = TRUE)                                    AS total_users,
+        (SELECT COUNT(*)                        FROM hosts  WHERE is_online = TRUE)                                    AS hosts_online,
+        (SELECT COUNT(*)                        FROM hosts  WHERE is_active = TRUE)                                    AS total_hosts,
+        (SELECT COUNT(*)                        FROM calls  WHERE DATE(created_at) = CURRENT_DATE)                    AS calls_today,
+        (SELECT COALESCE(SUM(amount_charged),0) FROM calls  WHERE DATE(created_at) = CURRENT_DATE AND status='ended') AS revenue_today,
+        (SELECT COUNT(*)                        FROM calls  WHERE status = 'ended')                                    AS total_calls,
+        (SELECT COALESCE(SUM(amount_charged),0) FROM calls  WHERE status = 'ended')                                    AS total_revenue,
+        (SELECT COUNT(*)                        FROM payouts WHERE status = 'pending')                                AS pending_payouts,
+        (SELECT COUNT(*)                        FROM hosts  WHERE is_verified = FALSE AND is_active = TRUE)           AS unverified_hosts
+    `),
+    query(`SELECT COUNT(*) AS active_promos FROM promo_codes WHERE is_active = TRUE`).catch(() => ({ rows: [{ active_promos: 0 }] })),
+  ]);
+  res.json({ success: true, data: { ...coreRes.rows[0], active_promos: promoRes.rows[0].active_promos } });
 });
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -145,18 +148,36 @@ router.get('/api/hosts', adminAuth, async (req, res) => {
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const listParams = [...params, Number(limit), offset];
 
-  const { rows } = await query(`
-    SELECT h.id, h.user_id, u.name, u.phone, u.avatar,
-           h.audio_rate_per_min, h.video_rate_per_min, h.rating,
-           h.total_calls, h.total_earnings, h.pending_earnings,
-           h.is_online, h.is_verified, h.is_active, h.is_promoted,
-           h.promoted_until, h.created_at
-    FROM hosts h
-    JOIN users u ON u.id = h.user_id
-    ${where}
-    ORDER BY h.created_at DESC
-    LIMIT $${listParams.length - 1} OFFSET $${listParams.length}
-  `, listParams);
+  // Try full query with promoted columns; fall back gracefully if migration not run yet
+  let rows;
+  try {
+    ({ rows } = await query(`
+      SELECT h.id, h.user_id, u.name, u.phone, u.avatar,
+             h.audio_rate_per_min, h.video_rate_per_min, h.rating,
+             h.total_calls, h.total_earnings, h.pending_earnings,
+             h.is_online, h.is_verified, h.is_active, h.is_promoted,
+             h.promoted_until, h.created_at
+      FROM hosts h
+      JOIN users u ON u.id = h.user_id
+      ${where}
+      ORDER BY h.created_at DESC
+      LIMIT $${listParams.length - 1} OFFSET $${listParams.length}
+    `, listParams));
+  } catch {
+    // Pre-migration fallback: is_promoted columns not yet added
+    ({ rows } = await query(`
+      SELECT h.id, h.user_id, u.name, u.phone, u.avatar,
+             h.audio_rate_per_min, h.video_rate_per_min, h.rating,
+             h.total_calls, h.total_earnings, h.pending_earnings,
+             h.is_online, h.is_verified, h.is_active,
+             FALSE AS is_promoted, NULL AS promoted_until, h.created_at
+      FROM hosts h
+      JOIN users u ON u.id = h.user_id
+      ${where}
+      ORDER BY h.created_at DESC
+      LIMIT $${listParams.length - 1} OFFSET $${listParams.length}
+    `, listParams));
+  }
 
   res.json({ success: true, data: rows });
 });
@@ -171,10 +192,17 @@ router.patch('/api/hosts/:id/verify', adminAuth, async (req, res) => {
 router.patch('/api/hosts/:id/promote', adminAuth, async (req, res) => {
   const { days = 30 } = req.body || {};
   const promotedUntil = new Date(Date.now() + Number(days) * 24 * 60 * 60 * 1000);
-  await query(
-    'UPDATE hosts SET is_promoted = TRUE, promoted_until = $1 WHERE id = $2',
-    [promotedUntil, req.params.id]
-  );
+  try {
+    await query(
+      'UPDATE hosts SET is_promoted = TRUE, promoted_until = $1 WHERE id = $2',
+      [promotedUntil, req.params.id]
+    );
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.status(503).json({ success: false, message: 'Run `node scripts/migrate.js` first to enable host promotions' });
+    }
+    throw err;
+  }
   logger.info('Admin host promoted', { hostId: req.params.id, days });
   res.json({ success: true, message: `Host promoted for ${days} days` });
 });
@@ -259,8 +287,13 @@ router.patch('/api/payouts/:id', adminAuth, async (req, res) => {
 
 // ── Promo Codes ───────────────────────────────────────────────────────────────
 router.get('/api/promo-codes', adminAuth, async (req, res) => {
-  const { rows } = await query('SELECT * FROM promo_codes ORDER BY created_at DESC LIMIT 100');
-  res.json({ success: true, data: rows });
+  try {
+    const { rows } = await query('SELECT * FROM promo_codes ORDER BY created_at DESC LIMIT 100');
+    res.json({ success: true, data: rows });
+  } catch {
+    // Table doesn't exist yet — migration not run
+    res.json({ success: true, data: [], _note: 'Run node scripts/migrate.js to enable promo codes' });
+  }
 });
 
 router.post('/api/promo-codes', adminAuth, async (req, res) => {
@@ -268,14 +301,20 @@ router.post('/api/promo-codes', adminAuth, async (req, res) => {
   if (!code || !amount) {
     return res.status(400).json({ success: false, message: 'code and amount are required' });
   }
-  const { rows } = await query(`
-    INSERT INTO promo_codes (code, amount, max_uses, expires_at)
-    VALUES ($1, $2, $3, $4)
-    RETURNING *
-  `, [code.toUpperCase().trim(), parseFloat(amount), parseInt(max_uses), expires_at || null]);
-
-  logger.info('Admin created promo code', { code: rows[0].code, amount });
-  res.json({ success: true, data: rows[0] });
+  try {
+    const { rows } = await query(`
+      INSERT INTO promo_codes (code, amount, max_uses, expires_at)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [code.toUpperCase().trim(), parseFloat(amount), parseInt(max_uses), expires_at || null]);
+    logger.info('Admin created promo code', { code: rows[0].code, amount });
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.status(503).json({ success: false, message: 'Run `node scripts/migrate.js` first to enable promo codes' });
+    }
+    throw err;
+  }
 });
 
 router.patch('/api/promo-codes/:id/deactivate', adminAuth, async (req, res) => {
