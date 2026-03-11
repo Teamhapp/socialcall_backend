@@ -3,10 +3,26 @@ const crypto = require('crypto');
 const { query, withTransaction } = require('../../config/database');
 const logger = require('../../config/logger');
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+// Lazy-init Razorpay only when real keys are present
+const hasRazorpayKeys = () =>
+  process.env.RAZORPAY_KEY_ID &&
+  process.env.RAZORPAY_KEY_SECRET &&
+  !String(process.env.RAZORPAY_KEY_ID).includes('xxx');
+
+let _rzp = null;
+const getRazorpay = () => {
+  if (!_rzp) {
+    _rzp = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return _rzp;
+};
+
+if (!hasRazorpayKeys()) {
+  logger.warn('⚠️  Razorpay keys not set — payments disabled. Add RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET to Replit Secrets to enable wallet recharge.');
+}
 
 // ─── Get Wallet Balance + Stats ───────────────────────────────────────────────
 const getWallet = async (userId) => {
@@ -32,17 +48,24 @@ const createOrder = async (userId, amountInRupees) => {
 
   const amountInPaise = Math.round(amountInRupees * 100);
 
-  // Create Razorpay order (dev mock when real keys not configured)
   let rzpOrder;
-  const isDev = process.env.NODE_ENV === 'development';
-  const hasRealKeys = process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_KEY_ID.includes('xxx');
 
-  if (isDev && !hasRealKeys) {
-    rzpOrder = { id: `order_dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
-    logger.info('[DEV] Mock Razorpay order', { orderId: rzpOrder.id });
+  if (!hasRazorpayKeys()) {
+    if (process.env.NODE_ENV !== 'production') {
+      // Development / test: return a mock order so the UI can be exercised
+      rzpOrder = { id: `order_dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
+      logger.info('[DEV] Mock Razorpay order (no real keys set)', { orderId: rzpOrder.id });
+    } else {
+      // Production without keys: fail clearly so the admin knows what to fix
+      logger.error('Razorpay order attempted but RAZORPAY_KEY_ID/KEY_SECRET not configured', { userId });
+      throw {
+        status: 503,
+        message: 'Payments are not configured yet. Please contact support.',
+      };
+    }
   } else {
     try {
-      rzpOrder = await razorpay.orders.create({
+      rzpOrder = await getRazorpay().orders.create({
         amount: amountInPaise,
         currency: 'INR',
         receipt: `wallet_${userId}_${Date.now()}`,
