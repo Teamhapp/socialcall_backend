@@ -172,4 +172,47 @@ router.post('/:id/follow', authenticate, async (req, res) => {
   res.json({ success: true, ...result });
 });
 
+// POST /api/hosts/payout — request a payout of pending earnings
+router.post('/payout', authenticate, requireHost, async (req, res) => {
+  const hostRes = await dbQuery(
+    'SELECT id, pending_earnings FROM hosts WHERE user_id = $1',
+    [req.user.id]
+  );
+  if (!hostRes.rows[0]) {
+    return res.status(404).json({ success: false, message: 'Host profile not found' });
+  }
+
+  const hostId = hostRes.rows[0].id;
+  const amount = parseFloat(hostRes.rows[0].pending_earnings);
+
+  if (amount < 500) {
+    return res.status(400).json({
+      success: false,
+      message: `Minimum payout is ₹500. Your current pending balance is ₹${amount.toFixed(2)}.`,
+    });
+  }
+
+  // Prevent duplicate pending payout request
+  const existingRes = await dbQuery(
+    "SELECT id FROM payouts WHERE host_id = $1 AND status = 'pending'",
+    [hostId]
+  );
+  if (existingRes.rows[0]) {
+    return res.status(409).json({
+      success: false,
+      message: 'You already have a pending payout request being processed.',
+    });
+  }
+
+  await dbQuery(
+    'INSERT INTO payouts (host_id, amount, status, requested_at) VALUES ($1, $2, $3, NOW())',
+    [hostId, amount, 'pending']
+  );
+
+  res.json({
+    success: true,
+    message: `Payout of ₹${amount.toFixed(2)} requested! We'll process it in 3–5 business days.`,
+  });
+});
+
 module.exports = router;

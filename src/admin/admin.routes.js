@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const { query, withTransaction } = require('../config/database');
 const logger = require('../config/logger');
+const notifService = require('../modules/notifications/notification.service');
 
 // ── Admin JWT middleware ───────────────────────────────────────────────────────
 const adminAuth = (req, res, next) => {
@@ -389,10 +390,17 @@ router.get('/api/kyc', adminAuth, async (req, res) => {
 });
 
 router.patch('/api/kyc/:id/approve', adminAuth, async (req, res) => {
+  let notifyUserId = null;
   try {
     await withTransaction(async (client) => {
-      const kycRes = await client.query('SELECT * FROM kyc_documents WHERE id = $1', [req.params.id]);
+      // Join hosts to get the user_id for the push notification
+      const kycRes = await client.query(`
+        SELECT k.*, h.user_id FROM kyc_documents k
+        JOIN hosts h ON h.id = k.host_id WHERE k.id = $1
+      `, [req.params.id]);
       if (!kycRes.rows[0]) throw { status: 404, message: 'KYC submission not found' };
+
+      notifyUserId = kycRes.rows[0].user_id;
 
       await client.query(
         `UPDATE kyc_documents SET status = 'approved', reviewed_at = NOW() WHERE id = $1`,
@@ -403,6 +411,16 @@ router.patch('/api/kyc/:id/approve', adminAuth, async (req, res) => {
         [kycRes.rows[0].host_id]
       );
     });
+
+    // Push notification — fire and forget (best-effort, outside transaction)
+    if (notifyUserId) {
+      notifService.sendToUser(notifyUserId, {
+        title: '✅ KYC Approved!',
+        body: 'Your identity is verified. Payouts are now enabled on your account.',
+        data: { type: 'kyc_approved' },
+      }).catch(() => {});
+    }
+
     logger.info('Admin KYC approved', { kycId: req.params.id });
     res.json({ success: true, message: 'KYC approved & host verified ✓' });
   } catch (err) {
@@ -415,10 +433,17 @@ router.patch('/api/kyc/:id/approve', adminAuth, async (req, res) => {
 
 router.patch('/api/kyc/:id/reject', adminAuth, async (req, res) => {
   const { reason = 'Document unclear or invalid' } = req.body || {};
+  let notifyUserId = null;
   try {
     await withTransaction(async (client) => {
-      const kycRes = await client.query('SELECT * FROM kyc_documents WHERE id = $1', [req.params.id]);
+      // Join hosts to get the user_id for the push notification
+      const kycRes = await client.query(`
+        SELECT k.*, h.user_id FROM kyc_documents k
+        JOIN hosts h ON h.id = k.host_id WHERE k.id = $1
+      `, [req.params.id]);
       if (!kycRes.rows[0]) throw { status: 404, message: 'KYC submission not found' };
+
+      notifyUserId = kycRes.rows[0].user_id;
 
       await client.query(
         `UPDATE kyc_documents SET status = 'rejected', rejection_reason = $1, reviewed_at = NOW() WHERE id = $2`,
@@ -429,6 +454,16 @@ router.patch('/api/kyc/:id/reject', adminAuth, async (req, res) => {
         [kycRes.rows[0].host_id]
       );
     });
+
+    // Push notification — fire and forget (best-effort, outside transaction)
+    if (notifyUserId) {
+      notifService.sendToUser(notifyUserId, {
+        title: '❌ KYC Not Approved',
+        body: `Reason: ${reason}. Please resubmit with valid documents.`,
+        data: { type: 'kyc_rejected', reason },
+      }).catch(() => {});
+    }
+
     logger.info('Admin KYC rejected', { kycId: req.params.id, reason });
     res.json({ success: true, message: 'KYC rejected' });
   } catch (err) {

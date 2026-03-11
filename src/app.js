@@ -149,6 +149,19 @@ app.patch('/api/users/profile', require('./middleware/auth').authenticate, async
   res.json({ success: true, data: rows[0] });
 });
 
+// Delete account (soft-delete: marks user inactive, clears sensitive data)
+app.delete('/api/users/me', require('./middleware/auth').authenticate, async (req, res) => {
+  const { withTransaction } = require('./config/database');
+  await withTransaction(async (client) => {
+    // Soft-delete: anonymise phone so it can be re-registered, clear FCM token
+    await client.query(
+      "UPDATE users SET is_active = FALSE, fcm_token = NULL, phone = CONCAT('del_', id, '_', SUBSTRING(phone, 1, 5)) WHERE id = $1 AND phone NOT LIKE 'del_%'",
+      [req.user.id]
+    );
+  });
+  res.json({ success: true, message: 'Account deleted' });
+});
+
 // ─── Error Handling ───────────────────────────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
