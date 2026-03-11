@@ -212,6 +212,10 @@
       </button>
 
       <div style="font-size:10px;font-weight:700;color:#3a3a60;letter-spacing:.8px;padding:16px 6px 6px;text-transform:uppercase;">Growth</div>
+      <button class="nav-item" data-tab="kyc" onclick="switchTab('kyc')">
+        <span class="nav-icon">🪪</span> KYC
+        <span class="nav-badge red" id="badge-kyc" style="display:none;"></span>
+      </button>
       <button class="nav-item" data-tab="offers" onclick="switchTab('offers')">
         <span class="nav-icon">🎁</span> Offers
       </button>
@@ -474,6 +478,20 @@
       </div>
 
       <!-- ── ANALYTICS ──────────────────────────────────────────────────────── -->
+      <!-- KYC Tab -->
+      <div id="tab-kyc" class="tab-pane">
+        <div style="display:flex;gap:10px;margin-bottom:20px;align-items:center;">
+          <select id="kycStatusFilter" onchange="loadKyc()" style="background:#1e1e35;color:#e2e2f2;border:1px solid #2e2e50;border-radius:8px;padding:7px 12px;font-size:13px;">
+            <option value="pending">Pending Review</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="all">All Submissions</option>
+          </select>
+          <button class="btn-primary" onclick="loadKyc()">Filter</button>
+        </div>
+        <div id="kycList"></div>
+      </div>
+
       <div id="tab-analytics" class="tab-pane">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
           <div class="chart-card">
@@ -580,6 +598,7 @@ const tabs = {
   hosts:     { title:'Hosts',     sub:'Verify, promote & manage hosts',   load: loadHosts },
   calls:     { title:'Calls',     sub:'Full call history',                load: loadCalls },
   payouts:   { title:'Payouts',   sub:'Process host payout requests',     load: loadPayouts },
+  kyc:       { title:'KYC',       sub:'Identity verification requests',   load: loadKyc },
   offers:    { title:'Offers',    sub:'Promo codes & bulk wallet bonuses', load: loadOffers },
   analytics: { title:'Analytics', sub:'30-day revenue & call trends',     load: loadAnalytics },
 };
@@ -614,6 +633,7 @@ async function loadDashboard() {
     // Update sidebar badges
     if (s.pending_payouts > 0) { $('badge-payouts').textContent=s.pending_payouts; $('badge-payouts').style.display=''; }
     if (s.unverified_hosts > 0) { $('badge-hosts').textContent=s.unverified_hosts; $('badge-hosts').style.display=''; }
+    if (s.pending_kyc > 0) { $('badge-kyc').textContent=s.pending_kyc; $('badge-kyc').style.display=''; }
 
     // Stats cards row 1
     $('statsGrid').innerHTML = [
@@ -628,6 +648,7 @@ async function loadDashboard() {
       { label:'Total Revenue',    value:fmtRs(s.total_revenue),    icon:'💎', color:'pink',   trend:'All time' },
       { label:'Total Calls',      value:fmtNum(s.total_calls),     icon:'📊', color:'teal',   trend:'All time' },
       { label:'Pending Payouts',  value:fmtNum(s.pending_payouts), icon:'💸', color:'red',    trend: s.pending_payouts>0 ? 'Action needed' : 'None pending' },
+      { label:'Pending KYC',     value:fmtNum(s.pending_kyc||0),  icon:'🪪', color:'orange', trend: (s.pending_kyc||0)>0 ? 'Needs review' : 'All clear' },
       { label:'Active Promos',    value:fmtNum(s.active_promos),   icon:'🎟️', color:'indigo', trend:null },
     ].map(c => statCard(c)).join('');
 
@@ -956,6 +977,94 @@ async function submitPayout(id, status) {
   const notes = document.getElementById('m_notes') ? $('m_notes').value : '';
   try { const r=await api('PATCH',`/api/payouts/${id}`,{status,reference_id:ref,notes}); toast(r.message,status==='approved'?'success':'warn'); closeModal(); loadPayouts(); }
   catch(e) { toast(e.message,'error'); }
+}
+
+// ── KYC ───────────────────────────────────────────────────────────────────────
+async function loadKyc() {
+  const status = document.getElementById('kycStatusFilter')?.value || 'pending';
+  try {
+    const r = await api('GET', `/api/kyc?status=${status}`);
+    const list = $('kycList');
+    if (!r.data || r.data.length === 0) {
+      list.innerHTML = `<div class="empty-state">No ${status === 'all' ? '' : status} KYC submissions found</div>`;
+      return;
+    }
+    list.innerHTML = r.data.map(k => `
+      <div style="background:#1e1e35;border:1px solid #2e2e50;border-radius:14px;padding:20px;margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+          ${k.host_avatar ? `<img src="${k.host_avatar}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;" onerror="this.style.display='none'"/>` : `<div style="width:44px;height:44px;border-radius:50%;background:#2e2e50;display:flex;align-items:center;justify-content:center;font-size:18px;">🧑</div>`}
+          <div style="flex:1;">
+            <div style="font-weight:700;color:#fff;">${k.host_name}</div>
+            <div style="font-size:12px;color:#7070a0;">${k.host_phone} • ${k.document_type?.toUpperCase() || 'DOC'}</div>
+          </div>
+          <div>
+            <span style="padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;
+              background:${k.status==='approved'?'#10b98120':k.status==='rejected'?'#ef444420':'#f59e0b20'};
+              color:${k.status==='approved'?'#10b981':k.status==='rejected'?'#ef4444':'#f59e0b'};">
+              ${k.status?.toUpperCase()}
+            </span>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;">
+          ${k.front_url ? `<div>
+            <div style="font-size:11px;color:#7070a0;margin-bottom:4px;">Front</div>
+            <a href="${k.front_url}" target="_blank">
+              <img src="${k.front_url}" style="width:100%;height:90px;object-fit:cover;border-radius:8px;border:1px solid #2e2e50;" onerror="this.parentElement.innerHTML='<div style=height:90px;background:#2e2e50;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#7070a0;font-size:11px;>Cannot load</div>'"/>
+            </a>
+          </div>` : ''}
+          ${k.back_url ? `<div>
+            <div style="font-size:11px;color:#7070a0;margin-bottom:4px;">Back</div>
+            <a href="${k.back_url}" target="_blank">
+              <img src="${k.back_url}" style="width:100%;height:90px;object-fit:cover;border-radius:8px;border:1px solid #2e2e50;" onerror="this.parentElement.innerHTML='<div style=height:90px;background:#2e2e50;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#7070a0;font-size:11px;>Cannot load</div>'"/>
+            </a>
+          </div>` : ''}
+          ${k.selfie_url ? `<div>
+            <div style="font-size:11px;color:#7070a0;margin-bottom:4px;">Selfie</div>
+            <a href="${k.selfie_url}" target="_blank">
+              <img src="${k.selfie_url}" style="width:100%;height:90px;object-fit:cover;border-radius:8px;border:1px solid #2e2e50;" onerror="this.parentElement.innerHTML='<div style=height:90px;background:#2e2e50;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#7070a0;font-size:11px;>Cannot load</div>'"/>
+            </a>
+          </div>` : ''}
+        </div>
+
+        <div style="font-size:11px;color:#5050a0;margin-bottom:${k.status==='pending'?'14px':'0'};">
+          Submitted: ${new Date(k.submitted_at).toLocaleString()}
+          ${k.rejection_reason ? ` • <span style="color:#ef4444;">Reason: ${k.rejection_reason}</span>` : ''}
+        </div>
+
+        ${k.status === 'pending' ? `
+        <div style="display:flex;gap:10px;">
+          <button onclick="kycAction(${k.id},'approve')" style="flex:1;padding:9px;background:linear-gradient(135deg,#10b981,#059669);border:none;color:#fff;border-radius:9px;font-size:12px;font-weight:600;cursor:pointer;">
+            ✓ Approve KYC
+          </button>
+          <button onclick="kycAction(${k.id},'reject')" style="flex:1;padding:9px;background:linear-gradient(135deg,#ef4444,#dc2626);border:none;color:#fff;border-radius:9px;font-size:12px;font-weight:600;cursor:pointer;">
+            ✗ Reject KYC
+          </button>
+        </div>` : ''}
+      </div>
+    `).join('');
+  } catch(e) {
+    $('kycList').innerHTML = `<div class="empty-state">${e.message || 'Failed to load KYC data'}</div>`;
+  }
+}
+
+async function kycAction(id, action) {
+  if (action === 'approve') {
+    if (!confirm('Approve this KYC? The host will be verified automatically.')) return;
+    try {
+      const r = await api('PATCH', `/api/kyc/${id}/approve`);
+      toast(r.message, 'success');
+      loadKyc();
+    } catch(e) { toast(e.message, 'error'); }
+  } else {
+    const reason = prompt('Rejection reason (shown to host):');
+    if (!reason) return;
+    try {
+      const r = await api('PATCH', `/api/kyc/${id}/reject`, { reason });
+      toast(r.message, 'warn');
+      loadKyc();
+    } catch(e) { toast(e.message, 'error'); }
+  }
 }
 
 // ── Offers ────────────────────────────────────────────────────────────────────

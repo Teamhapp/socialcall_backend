@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "SocialCall Backend",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "node server.js"],
       "port": 5000
     }
   ]

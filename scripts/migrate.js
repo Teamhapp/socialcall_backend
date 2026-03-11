@@ -247,6 +247,31 @@ const migrate = async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_promo_redemptions_user ON promo_redemptions(user_id);`);
     console.log('  ✅ promo_redemptions');
 
+    // ── KYC – host identity verification ─────────────────────────────────────
+    // Add kyc_status column to hosts (safe no-op if already present)
+    await client.query(`ALTER TABLE hosts ADD COLUMN IF NOT EXISTS kyc_status VARCHAR(20) NOT NULL DEFAULT 'not_submitted';`);
+    console.log('  ✅ hosts (kyc_status)');
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kyc_documents (
+        id                BIGSERIAL PRIMARY KEY,
+        host_id           BIGINT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        document_type     VARCHAR(30) NOT NULL DEFAULT 'aadhaar',
+        front_url         TEXT NOT NULL,
+        back_url          TEXT,
+        selfie_url        TEXT,
+        status            VARCHAR(20) NOT NULL DEFAULT 'pending',
+        rejection_reason  TEXT,
+        submitted_at      TIMESTAMPTZ DEFAULT NOW(),
+        reviewed_at       TIMESTAMPTZ,
+        reviewed_by       TEXT DEFAULT 'admin',
+        UNIQUE(host_id)
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kyc_status ON kyc_documents(status);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kyc_host ON kyc_documents(host_id);`);
+    console.log('  ✅ kyc_documents');
+
     // ── Indexes for performance ───────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_is_online ON hosts(is_online);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_rating ON hosts(rating DESC);`);

@@ -45,7 +45,7 @@ router.post('/api/login', (req, res) => {
 // ── Dashboard Stats ───────────────────────────────────────────────────────────
 router.get('/api/stats', adminAuth, async (req, res) => {
   // Run core stats + promo count separately to gracefully handle pre-migration state
-  const [coreRes, promoRes] = await Promise.all([
+  const [coreRes, promoRes, kycRes] = await Promise.all([
     query(`
       SELECT
         (SELECT COUNT(*)                        FROM users  WHERE is_active = TRUE)                                    AS total_users,
@@ -59,8 +59,9 @@ router.get('/api/stats', adminAuth, async (req, res) => {
         (SELECT COUNT(*)                        FROM hosts  WHERE is_verified = FALSE AND is_active = TRUE)           AS unverified_hosts
     `),
     query(`SELECT COUNT(*) AS active_promos FROM promo_codes WHERE is_active = TRUE`).catch(() => ({ rows: [{ active_promos: 0 }] })),
+    query(`SELECT COUNT(*) AS pending_kyc FROM kyc_documents WHERE status = 'pending'`).catch(() => ({ rows: [{ pending_kyc: 0 }] })),
   ]);
-  res.json({ success: true, data: { ...coreRes.rows[0], active_promos: promoRes.rows[0].active_promos } });
+  res.json({ success: true, data: { ...coreRes.rows[0], active_promos: promoRes.rows[0].active_promos, pending_kyc: kycRes.rows[0].pending_kyc } });
 });
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -360,6 +361,82 @@ router.post('/api/offers/wallet-bonus', adminAuth, async (req, res) => {
 
   logger.info('Admin bulk wallet bonus', { amount: numAmount, userCount: userIds.length, filter });
   res.json({ success: true, message: `₹${numAmount} credited to ${userIds.length} users`, count: userIds.length });
+});
+
+// ── KYC Management ────────────────────────────────────────────────────────────
+router.get('/api/kyc', adminAuth, async (req, res) => {
+  const { status = 'pending' } = req.query;
+  try {
+    const validStatuses = ['pending', 'approved', 'rejected', 'all'];
+    const statusFilter = validStatuses.includes(status) ? status : 'pending';
+    const where = statusFilter === 'all' ? '' : `WHERE k.status = '${statusFilter}'`;
+    const { rows } = await query(`
+      SELECT k.id, k.host_id, k.document_type, k.front_url, k.back_url, k.selfie_url,
+             k.status, k.rejection_reason, k.submitted_at, k.reviewed_at,
+             u.name AS host_name, u.phone AS host_phone, u.avatar AS host_avatar,
+             h.is_verified, h.kyc_status
+      FROM kyc_documents k
+      JOIN hosts h ON h.id = k.host_id
+      JOIN users u ON u.id = h.user_id
+      ${where}
+      ORDER BY k.submitted_at DESC
+      LIMIT 100
+    `);
+    res.json({ success: true, data: rows });
+  } catch {
+    res.json({ success: true, data: [], _note: 'Run node scripts/migrate.js to enable KYC' });
+  }
+});
+
+router.patch('/api/kyc/:id/approve', adminAuth, async (req, res) => {
+  try {
+    await withTransaction(async (client) => {
+      const kycRes = await client.query('SELECT * FROM kyc_documents WHERE id = $1', [req.params.id]);
+      if (!kycRes.rows[0]) throw { status: 404, message: 'KYC submission not found' };
+
+      await client.query(
+        `UPDATE kyc_documents SET status = 'approved', reviewed_at = NOW() WHERE id = $1`,
+        [req.params.id]
+      );
+      await client.query(
+        `UPDATE hosts SET kyc_status = 'approved', is_verified = TRUE WHERE id = $1`,
+        [kycRes.rows[0].host_id]
+      );
+    });
+    logger.info('Admin KYC approved', { kycId: req.params.id });
+    res.json({ success: true, message: 'KYC approved & host verified ✓' });
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.status(503).json({ success: false, message: 'Run `node scripts/migrate.js` first' });
+    }
+    throw err;
+  }
+});
+
+router.patch('/api/kyc/:id/reject', adminAuth, async (req, res) => {
+  const { reason = 'Document unclear or invalid' } = req.body || {};
+  try {
+    await withTransaction(async (client) => {
+      const kycRes = await client.query('SELECT * FROM kyc_documents WHERE id = $1', [req.params.id]);
+      if (!kycRes.rows[0]) throw { status: 404, message: 'KYC submission not found' };
+
+      await client.query(
+        `UPDATE kyc_documents SET status = 'rejected', rejection_reason = $1, reviewed_at = NOW() WHERE id = $2`,
+        [reason, req.params.id]
+      );
+      await client.query(
+        `UPDATE hosts SET kyc_status = 'rejected' WHERE id = $1`,
+        [kycRes.rows[0].host_id]
+      );
+    });
+    logger.info('Admin KYC rejected', { kycId: req.params.id, reason });
+    res.json({ success: true, message: 'KYC rejected' });
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.status(503).json({ success: false, message: 'Run `node scripts/migrate.js` first' });
+    }
+    throw err;
+  }
 });
 
 // ── Analytics (recent revenue chart data) ────────────────────────────────────

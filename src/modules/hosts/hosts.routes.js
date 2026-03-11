@@ -1,8 +1,32 @@
 const router = require('express').Router();
-const { body, query: qv, param } = require('express-validator');
+const { body } = require('express-validator');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate, requireHost, optionalAuth } = require('../../middleware/auth');
 const svc = require('./hosts.service');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { query: dbQuery } = require('../../config/database');
+
+// ── Multer setup for KYC uploads ──────────────────────────────────────────────
+const kycUploadDir = path.join(__dirname, '..', '..', '..', 'uploads', 'kyc');
+if (!fs.existsSync(kycUploadDir)) fs.mkdirSync(kycUploadDir, { recursive: true });
+
+const kycStorage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, kycUploadDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.jpg';
+    cb(null, `kyc_${req.user?.id}_${file.fieldname}_${Date.now()}${ext}`);
+  },
+});
+const kycUpload = multer({
+  storage: kycStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max per file
+  fileFilter: (_, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only image files allowed'));
+  },
+});
 
 // GET /api/hosts — list / search hosts
 router.get('/', optionalAuth, async (req, res) => {
@@ -22,6 +46,81 @@ router.get('/following', authenticate, async (req, res) => {
   const hosts = await svc.getFollowing(req.user.id);
   res.json({ success: true, data: hosts });
 });
+
+// GET /api/hosts/kyc — get own KYC status
+router.get('/kyc', authenticate, requireHost, async (req, res) => {
+  try {
+    // Get host id
+    const hostRes = await dbQuery('SELECT id FROM hosts WHERE user_id = $1', [req.user.id]);
+    if (!hostRes.rows[0]) return res.status(404).json({ success: false, message: 'Host profile not found' });
+    const hostId = hostRes.rows[0].id;
+
+    const { rows } = await dbQuery(
+      'SELECT * FROM kyc_documents WHERE host_id = $1',
+      [hostId]
+    );
+    const kycStatusRes = await dbQuery('SELECT kyc_status FROM hosts WHERE id = $1', [hostId]);
+    res.json({
+      success: true,
+      data: {
+        kyc_status: kycStatusRes.rows[0]?.kyc_status || 'not_submitted',
+        submission: rows[0] || null,
+      },
+    });
+  } catch {
+    res.json({ success: true, data: { kyc_status: 'not_submitted', submission: null } });
+  }
+});
+
+// POST /api/hosts/kyc — submit KYC documents
+router.post(
+  '/kyc',
+  authenticate,
+  requireHost,
+  kycUpload.fields([
+    { name: 'front', maxCount: 1 },
+    { name: 'back', maxCount: 1 },
+    { name: 'selfie', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const { document_type = 'aadhaar' } = req.body || {};
+    const files = req.files || {};
+
+    if (!files.front || files.front.length === 0) {
+      return res.status(400).json({ success: false, message: 'Front image of document is required' });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const frontUrl  = `${baseUrl}/uploads/kyc/${files.front[0].filename}`;
+    const backUrl   = files.back?.[0]   ? `${baseUrl}/uploads/kyc/${files.back[0].filename}`   : null;
+    const selfieUrl = files.selfie?.[0] ? `${baseUrl}/uploads/kyc/${files.selfie[0].filename}` : null;
+
+    // Get host id
+    const hostRes = await dbQuery('SELECT id FROM hosts WHERE user_id = $1', [req.user.id]);
+    if (!hostRes.rows[0]) return res.status(404).json({ success: false, message: 'Host profile not found' });
+    const hostId = hostRes.rows[0].id;
+
+    // Upsert KYC document (one submission per host)
+    const { rows } = await dbQuery(`
+      INSERT INTO kyc_documents (host_id, document_type, front_url, back_url, selfie_url, status, submitted_at)
+      VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+      ON CONFLICT (host_id) DO UPDATE SET
+        document_type = EXCLUDED.document_type,
+        front_url     = EXCLUDED.front_url,
+        back_url      = EXCLUDED.back_url,
+        selfie_url    = EXCLUDED.selfie_url,
+        status        = 'pending',
+        rejection_reason = NULL,
+        submitted_at  = NOW()
+      RETURNING *
+    `, [hostId, document_type, frontUrl, backUrl, selfieUrl]);
+
+    // Update host kyc_status
+    await dbQuery('UPDATE hosts SET kyc_status = $1 WHERE id = $2', ['pending', hostId]);
+
+    res.json({ success: true, message: 'KYC submitted for review. We\'ll notify you within 24 hours.', data: rows[0] });
+  }
+);
 
 // GET /api/hosts/:id — single host profile
 router.get('/:id', optionalAuth, async (req, res) => {
