@@ -63,6 +63,22 @@ router.post('/gift', authenticate,
   }
 );
 
+// POST /api/wallet/redeem-promo — redeem a promo code for wallet credit
+router.post('/redeem-promo', authenticate,
+  [
+    body('code').notEmpty().withMessage('Promo code is required'),
+    validate,
+  ],
+  async (req, res) => {
+    const result = await svc.redeemPromoCode(req.user.id, req.body.code);
+    res.json({
+      success: true,
+      message: `🎉 ₹${result.amount} credited! New balance: ₹${result.newBalance.toFixed(2)}`,
+      data: result,
+    });
+  }
+);
+
 // GET /api/wallet/gifts — available gifts catalogue
 router.get('/gifts', async (req, res) => {
   const { query } = require('../../config/database');

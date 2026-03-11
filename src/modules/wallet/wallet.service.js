@@ -191,4 +191,61 @@ const sendGift = async (senderId, receiverHostId, giftId) => {
   });
 };
 
-module.exports = { getWallet, createOrder, verifyPayment, getTransactions, sendGift };
+// ─── Redeem Promo Code ────────────────────────────────────────────────────────
+const redeemPromoCode = async (userId, code) => {
+  return withTransaction(async (client) => {
+    // Validate code
+    const codeRes = await client.query(`
+      SELECT * FROM promo_codes
+      WHERE code = $1 AND is_active = TRUE
+        AND (expires_at IS NULL OR expires_at > NOW())
+        AND used_count < max_uses
+    `, [code.toUpperCase().trim()]);
+
+    if (!codeRes.rows[0]) {
+      throw { status: 400, message: 'Invalid, expired, or fully used promo code' };
+    }
+
+    const promo = codeRes.rows[0];
+
+    // Check if user already redeemed
+    const alreadyUsed = await client.query(
+      'SELECT id FROM promo_redemptions WHERE code_id = $1 AND user_id = $2',
+      [promo.id, userId]
+    );
+    if (alreadyUsed.rows[0]) {
+      throw { status: 400, message: 'You have already redeemed this code' };
+    }
+
+    // Credit wallet
+    const userRes = await client.query(
+      'UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance',
+      [promo.amount, userId]
+    );
+    const newBalance = parseFloat(userRes.rows[0].wallet_balance);
+
+    // Log transaction
+    await client.query(`
+      INSERT INTO transactions
+        (user_id, type, status, amount, is_credit, balance_after, description, reference_id)
+      VALUES ($1, 'promo_credit', 'completed', $2, TRUE, $3, $4, $5)
+    `, [userId, promo.amount, newBalance, `Promo code: ${promo.code}`, String(promo.id)]);
+
+    // Record redemption
+    await client.query(
+      'INSERT INTO promo_redemptions (code_id, user_id) VALUES ($1, $2)',
+      [promo.id, userId]
+    );
+
+    // Increment used_count
+    await client.query(
+      'UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1',
+      [promo.id]
+    );
+
+    logger.info('Promo code redeemed', { userId, code: promo.code, amount: promo.amount });
+    return { amount: promo.amount, newBalance, code: promo.code };
+  });
+};
+
+module.exports = { getWallet, createOrder, verifyPayment, getTransactions, sendGift, redeemPromoCode };

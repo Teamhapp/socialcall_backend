@@ -28,6 +28,7 @@ const hostsRoutes  = require('./modules/hosts/hosts.routes');
 const callsRoutes  = require('./modules/calls/calls.routes');
 const chatRoutes   = require('./modules/chat/chat.routes');
 const walletRoutes = require('./modules/wallet/wallet.routes');
+const adminRoutes  = require('./admin/admin.routes');
 
 const app = express();
 
@@ -104,6 +105,7 @@ app.use('/api/hosts',  hostsRoutes);
 app.use('/api/calls',  callsRoutes);
 app.use('/api/chat',   chatRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/admin',      adminRoutes);
 
 // FCM token registration
 app.post('/api/users/fcm-token',

@@ -214,9 +214,43 @@ const migrate = async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_payouts_host ON payouts(host_id);`);
     console.log('  ✅ payouts');
 
+    // ── Host promotion columns (safe no-op if already present) ───────────────
+    await client.query(`ALTER TABLE hosts ADD COLUMN IF NOT EXISTS is_promoted    BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE hosts ADD COLUMN IF NOT EXISTS promoted_until TIMESTAMPTZ;`);
+    console.log('  ✅ hosts (is_promoted)');
+
+    // ── Promo Codes ───────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS promo_codes (
+        id          BIGSERIAL PRIMARY KEY,
+        code        VARCHAR(50) UNIQUE NOT NULL,
+        amount      DECIMAL(10,2) NOT NULL,
+        max_uses    INT NOT NULL DEFAULT 1,
+        used_count  INT NOT NULL DEFAULT 0,
+        expires_at  TIMESTAMPTZ,
+        is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    console.log('  ✅ promo_codes');
+
+    // ── Promo Redemptions ─────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS promo_redemptions (
+        id          BIGSERIAL PRIMARY KEY,
+        code_id     BIGINT NOT NULL REFERENCES promo_codes(id) ON DELETE CASCADE,
+        user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        redeemed_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(code_id, user_id)
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_promo_redemptions_user ON promo_redemptions(user_id);`);
+    console.log('  ✅ promo_redemptions');
+
     // ── Indexes for performance ───────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_is_online ON hosts(is_online);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_rating ON hosts(rating DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_is_promoted ON hosts(is_promoted);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at DESC);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at DESC);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);`);
