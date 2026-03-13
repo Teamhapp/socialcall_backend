@@ -226,6 +226,7 @@ const initSocket = (io) => {
     socket.on('call_rejected', async (data) => {
       const { callId } = data;
       await query(`UPDATE calls SET status = 'failed' WHERE id = $1`, [callId]);
+      await del(`call:${callId}`); // clean up Redis cache
       const callRes = await query('SELECT user_id FROM calls WHERE id = $1', [callId]);
       const callerId = callRes.rows[0]?.user_id;
       io.to(`user:${callerId}`).emit('call_rejected', { callId });
@@ -311,6 +312,31 @@ const initSocket = (io) => {
       // Clean up any active wallet checks where this user was the caller
       for (const [cid, entry] of callCheckIntervals.entries()) {
         if (entry.callerId === userId) stopWalletCheck(cid);
+      }
+
+      // Auto-end any active calls involving this user (as caller OR as host).
+      // Prevents calls from hanging forever when a party loses internet.
+      try {
+        const activeRes = await query(`
+          SELECT c.id AS call_id, c.user_id AS caller_id, h.user_id AS host_user_id
+          FROM calls c
+          JOIN hosts h ON h.id = c.host_id
+          WHERE c.status IN ('ringing', 'connected')
+            AND (c.user_id = $1 OR h.user_id = $1)
+        `, [userId]);
+
+        for (const row of activeRes.rows) {
+          try {
+            stopWalletCheck(row.call_id);
+            const result = await callsService.endCall(row.call_id, userId);
+            io.to(`user:${row.caller_id}`).to(`user:${row.host_user_id}`)
+              .emit('call_summary', { callId: row.call_id, ...result, autoEnded: true });
+          } catch (e) {
+            logger.error('Auto-end on disconnect failed', { callId: row.call_id, err: e.message });
+          }
+        }
+      } catch (err) {
+        logger.error('Disconnect call cleanup error', { userId, err: err.message });
       }
 
       logger.info('Socket disconnected', { userId, socketId: socket.id });

@@ -172,18 +172,39 @@ router.post('/:id/follow', authenticate, async (req, res) => {
   res.json({ success: true, ...result });
 });
 
+// GET /api/hosts/payouts — host's own payout history
+router.get('/payouts', authenticate, requireHost, async (req, res) => {
+  const hostRes = await dbQuery('SELECT id FROM hosts WHERE user_id = $1', [req.user.id]);
+  if (!hostRes.rows[0]) return res.status(404).json({ success: false, message: 'Host profile not found' });
+
+  const { rows } = await dbQuery(
+    `SELECT id, amount, status, notes, requested_at, processed_at, reference_id
+     FROM payouts WHERE host_id = $1 ORDER BY requested_at DESC LIMIT 20`,
+    [hostRes.rows[0].id]
+  );
+  res.json({ success: true, data: rows });
+});
+
 // POST /api/hosts/payout — request a payout of pending earnings
 router.post('/payout', authenticate, requireHost, async (req, res) => {
   const hostRes = await dbQuery(
-    'SELECT id, pending_earnings FROM hosts WHERE user_id = $1',
+    'SELECT id, pending_earnings, is_verified FROM hosts WHERE user_id = $1',
     [req.user.id]
   );
   if (!hostRes.rows[0]) {
     return res.status(404).json({ success: false, message: 'Host profile not found' });
   }
 
-  const hostId = hostRes.rows[0].id;
-  const amount = parseFloat(hostRes.rows[0].pending_earnings);
+  const { id: hostId, pending_earnings, is_verified } = hostRes.rows[0];
+  const amount = parseFloat(pending_earnings);
+
+  // KYC gate — only verified hosts can withdraw
+  if (!is_verified) {
+    return res.status(403).json({
+      success: false,
+      message: 'Complete KYC verification to enable payouts.',
+    });
+  }
 
   if (amount < 500) {
     return res.status(400).json({
@@ -204,9 +225,27 @@ router.post('/payout', authenticate, requireHost, async (req, res) => {
     });
   }
 
+  // Validate payment details
+  const { paymentMethod, paymentDetails } = req.body || {};
+  if (!paymentMethod || !paymentDetails) {
+    return res.status(400).json({ success: false, message: 'Payment method and details are required.' });
+  }
+  if (!['upi', 'bank'].includes(paymentMethod)) {
+    return res.status(400).json({ success: false, message: 'Invalid payment method. Use "upi" or "bank".' });
+  }
+  if (paymentMethod === 'upi' && !paymentDetails.upiId) {
+    return res.status(400).json({ success: false, message: 'UPI ID is required.' });
+  }
+  if (paymentMethod === 'bank' && (!paymentDetails.accountNumber || !paymentDetails.ifsc || !paymentDetails.accountHolder)) {
+    return res.status(400).json({ success: false, message: 'Account number, IFSC code, and account holder name are required.' });
+  }
+
+  // Store payment details in notes as JSON (admin reads this when processing)
+  const notes = JSON.stringify({ paymentMethod, ...paymentDetails });
+
   await dbQuery(
-    'INSERT INTO payouts (host_id, amount, status, requested_at) VALUES ($1, $2, $3, NOW())',
-    [hostId, amount, 'pending']
+    'INSERT INTO payouts (host_id, amount, status, notes, requested_at) VALUES ($1, $2, $3, $4, NOW())',
+    [hostId, amount, 'pending', notes]
   );
 
   res.json({

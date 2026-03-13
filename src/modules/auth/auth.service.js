@@ -301,6 +301,7 @@ const sanitizeUser = (user) => ({
   walletBalance: parseFloat(user.wallet_balance),
   isHost:        user.is_host,
   hasPassword:   !!user.password_hash,   // tells client if password login is available
+  created_at:    user.created_at,
 });
 
 module.exports = {

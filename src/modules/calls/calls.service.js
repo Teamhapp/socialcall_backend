@@ -100,12 +100,18 @@ const endCall = async (callId, endedBy) => {
     const endedAt = new Date();
     const durationSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
     const durationMinutes = durationSeconds / 60;
-    const amountCharged = Math.min(
-      parseFloat(call.rate_per_min) * durationMinutes,
-      // Get current user balance
-      parseFloat((await client.query('SELECT wallet_balance FROM users WHERE id = $1', [call.user_id])).rows[0]?.wallet_balance || 0)
-    );
-    const amountRounded = Math.round(amountCharged * 100) / 100;
+
+    // Grace period: calls under 10 seconds are free (network glitch / accidental connect)
+    const GRACE_PERIOD_SECONDS = 10;
+    let amountRounded = 0;
+    if (durationSeconds >= GRACE_PERIOD_SECONDS) {
+      const amountCharged = Math.min(
+        parseFloat(call.rate_per_min) * durationMinutes,
+        // Get current user balance
+        parseFloat((await client.query('SELECT wallet_balance FROM users WHERE id = $1', [call.user_id])).rows[0]?.wallet_balance || 0)
+      );
+      amountRounded = Math.round(amountCharged * 100) / 100;
+    }
     const hostEarnings = Math.round(amountRounded * (1 - COMMISSION / 100) * 100) / 100;
 
     // Update call record

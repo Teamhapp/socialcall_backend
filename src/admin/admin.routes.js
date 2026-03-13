@@ -258,23 +258,38 @@ router.get('/api/payouts', adminAuth, async (req, res) => {
 });
 
 router.patch('/api/payouts/:id', adminAuth, async (req, res) => {
-  const { status, reference_id, notes } = req.body || {};
+  const { status, reference_id, notes: adminNote } = req.body || {};
   if (!['approved', 'rejected'].includes(status)) {
     return res.status(400).json({ success: false, message: 'Status must be approved or rejected' });
   }
 
+  let notifyUserId = null;
+  let payoutAmount = 0;
+
   await withTransaction(async (client) => {
-    const payoutRes = await client.query('SELECT * FROM payouts WHERE id = $1 AND status = $2', [req.params.id, 'pending']);
+    // JOIN hosts to get host user_id for push notification
+    const payoutRes = await client.query(
+      `SELECT p.*, h.user_id FROM payouts p JOIN hosts h ON h.id = p.host_id WHERE p.id = $1 AND p.status = $2`,
+      [req.params.id, 'pending']
+    );
     if (!payoutRes.rows[0]) throw { status: 404, message: 'Payout not found or already processed' };
 
     const payout = payoutRes.rows[0];
+    notifyUserId = payout.user_id;
+    payoutAmount = parseFloat(payout.amount);
+
+    // Preserve payment details already in notes; append admin note
+    let notesData = {};
+    try { notesData = JSON.parse(payout.notes || '{}'); } catch { notesData = { raw: payout.notes }; }
+    if (adminNote) notesData.adminNote = adminNote;
+    const mergedNotes = JSON.stringify(notesData);
+
     await client.query(
       'UPDATE payouts SET status=$1, reference_id=$2, notes=$3, processed_at=NOW() WHERE id=$4',
-      [status, reference_id || null, notes || null, req.params.id]
+      [status, reference_id || null, mergedNotes, req.params.id]
     );
 
     if (status === 'approved') {
-      // Deduct from pending_earnings since it's now paid
       await client.query(
         'UPDATE hosts SET pending_earnings = GREATEST(0, pending_earnings - $1) WHERE id = $2',
         [payout.amount, payout.host_id]
@@ -283,6 +298,18 @@ router.patch('/api/payouts/:id', adminAuth, async (req, res) => {
 
     logger.info('Admin payout processed', { payoutId: req.params.id, status, amount: payout.amount });
   });
+
+  // Push notification to host — fire-and-forget, outside transaction
+  if (notifyUserId) {
+    const isApproved = status === 'approved';
+    notifService.sendToUser(notifyUserId, {
+      title: isApproved ? '✅ Payout Processed!' : '❌ Payout Rejected',
+      body: isApproved
+        ? `₹${payoutAmount.toFixed(2)} has been transferred to your account.${reference_id ? ` Ref: ${reference_id}` : ''}`
+        : `Your payout was rejected. ${adminNote || 'Please contact support for details.'}`,
+      data: { type: isApproved ? 'payout_approved' : 'payout_rejected' },
+    }).catch(() => {});
+  }
 
   res.json({ success: true, message: `Payout ${status}` });
 });

@@ -929,38 +929,63 @@ async function loadCalls() {
 }
 
 // ── Payouts ──────────────────────────────────────────────────────────────────
+let _payoutsData = []; // cache for modal lookup
+
+function parsePayoutNotes(raw) {
+  try { return JSON.parse(raw || '{}'); } catch { return {}; }
+}
+function paymentDestDisplay(notes) {
+  if (!notes.paymentMethod) return '—';
+  if (notes.paymentMethod === 'upi') return `UPI: ${notes.upiId || '—'}`;
+  const parts = [`Acct: ${notes.accountNumber||'—'}`, `IFSC: ${notes.ifsc||'—'}`];
+  if (notes.accountHolder) parts.push(notes.accountHolder);
+  return parts.join(' / ');
+}
+
 async function loadPayouts() {
   $('payoutsTableWrap').innerHTML = '<div style="padding:40px;text-align:center;color:#4040700;" class="pulse">Loading…</div>';
   try {
     const st = $('payoutStatus').value;
     const { data } = await api('GET',`/api/payouts?status=${st}`);
+    _payoutsData = data;
     const total = data.reduce((a,p)=>a+Number(p.amount||0),0);
     $('payoutSummary').textContent = data.length ? `${data.length} payout${data.length>1?'s':''} • Total: ${fmtRs(total)}` : '';
     if (!data.length) { $('payoutsTableWrap').innerHTML=`<div style="padding:50px;text-align:center;color:#4040700;">No ${st} payouts</div>`; return; }
     $('payoutsTableWrap').innerHTML = `<div style="overflow-x:auto;"><table class="data-table">
-      <thead><tr><th>Host</th><th>Amount</th><th>UPI / Bank</th><th>Requested</th><th>Status</th><th>${st==='pending'?'Actions':'Reference'}</th></tr></thead>
-      <tbody>${data.map(p=>`<tr>
+      <thead><tr><th>Host</th><th>Amount</th><th>Payment Destination</th><th>Requested</th><th>Status</th><th>${st==='pending'?'Actions':'Reference'}</th></tr></thead>
+      <tbody>${data.map(p=>{
+        const notes = parsePayoutNotes(p.notes);
+        const dest = paymentDestDisplay(notes);
+        return `<tr>
         <td>
           <div style="font-weight:600;color:#e2e2f2;">${esc(p.host_name)}</div>
           <code style="font-size:11px;color:#5050800;">${esc(p.host_phone)}</code>
         </td>
         <td style="color:#34d399;font-size:16px;font-weight:800;">${fmtRs(p.amount)}</td>
-        <td style="font-size:12px;color:#7070a0;font-family:monospace;">${esc(p.upi_id||p.bank_account||'—')}</td>
-        <td style="color:#5050800;font-size:12px;">${fmtDate(p.requested_at)}</td>
+        <td style="font-size:12px;color:#a0a0c0;font-family:monospace;">${esc(dest)}</td>
+        <td style="color:#7070a0;font-size:12px;">${fmtDate(p.requested_at)}</td>
         <td><span class="badge ${callStatusBadge(p.status)||'badge-gray'}">${p.status}</span></td>
         <td>${st==='pending'
-          ? `<div style="display:flex;gap:6px;"><button class="btn-success" onclick="showPayoutModal(${p.id},'approved','${esc(p.host_name)}')">✓ Approve</button><button class="btn-danger" onclick="showPayoutModal(${p.id},'rejected','${esc(p.host_name)}')">✕ Reject</button></div>`
+          ? `<div style="display:flex;gap:6px;"><button class="btn-success" onclick="showPayoutModal(${p.id},'approved')">✓ Approve</button><button class="btn-danger" onclick="showPayoutModal(${p.id},'rejected')">✕ Reject</button></div>`
           : `<code style="font-size:11px;color:#7070a0;">${esc(p.reference_id||'—')}</code>`
         }</td>
-      </tr>`).join('')}</tbody>
+      </tr>`;}).join('')}</tbody>
     </table></div>`;
   } catch(e) { $('payoutsTableWrap').innerHTML=`<div style="padding:40px;text-align:center;color:#f87171;">Error: ${e.message}</div>`; }
 }
 
-function showPayoutModal(id, action, name) {
-  const isApprove = action==='approved';
+function showPayoutModal(id, action) {
+  const p = _payoutsData.find(x => x.id === id) || {};
+  const notes = parsePayoutNotes(p.notes);
+  const dest = paymentDestDisplay(notes);
+  const isApprove = action === 'approved';
   $('modalContent').innerHTML = `
-    <div class="modal-title">${isApprove?'✅ Approve':'❌ Reject'} Payout — ${esc(name)}</div>
+    <div class="modal-title">${isApprove?'✅ Approve':'❌ Reject'} Payout — ${esc(p.host_name||'')}</div>
+    <div style="background:#0f0f1e;border:1px solid #2e2e50;border-radius:10px;padding:14px;margin-bottom:16px;">
+      <div style="font-size:10px;font-weight:700;color:#5050800;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;">Send Money To</div>
+      <div style="font-size:13px;color:#e2e2f2;font-family:monospace;word-break:break-all;">${esc(dest)}</div>
+      <div style="font-size:12px;color:#6060a0;margin-top:4px;">${esc(p.host_name||'')} • ${fmtRs(p.amount||0)}</div>
+    </div>
     ${isApprove?`<div style="margin-bottom:14px;"><label>UTR / Reference ID</label><input id="m_ref" type="text" placeholder="UTR number or transaction ID"/></div>`:''}
     <div style="margin-bottom:20px;"><label>Notes (optional)</label><input id="m_notes" type="text" placeholder="${isApprove?'Payment via NEFT/UPI':'Reason for rejection'}"/></div>
     <div style="display:flex;gap:10px;">
