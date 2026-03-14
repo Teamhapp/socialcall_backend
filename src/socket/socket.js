@@ -9,6 +9,46 @@ const logger = require('../config/logger');
 // Track online users: userId → socketId
 const onlineUsers = new Map();
 
+// ─── Notify followers that a host just came online (called by socket + REST) ──
+// Uses a 5-minute Redis cooldown so rapid reconnects don't spam followers.
+async function notifyFollowersOnline(io, hostUserId) {
+  const cooldownKey = `host_online_notified:${hostUserId}`;
+  if (await get(cooldownKey)) return;
+
+  const hostRes = await query(
+    `SELECT h.id, u.name FROM hosts h JOIN users u ON u.id = h.user_id WHERE h.user_id = $1`,
+    [hostUserId]
+  );
+  const host = hostRes.rows[0];
+  if (!host) return;
+
+  const followersRes = await query(
+    'SELECT user_id FROM followers WHERE host_id = $1', [host.id]
+  );
+  const followerIds = followersRes.rows.map(r => r.user_id);
+  if (!followerIds.length) return;
+
+  // Push to followers who are offline; emit socket event to online followers.
+  const offlineIds = followerIds.filter(id => !onlineUsers.has(id));
+  if (offlineIds.length) {
+    await notifService.sendToMultiple(offlineIds, {
+      title: `💜 ${host.name} is now online!`,
+      body: 'Tap to call now',
+      data: { type: 'host_online', hostId: host.id, hostName: host.name },
+    });
+  }
+
+  for (const uid of followerIds) {
+    if (onlineUsers.has(uid)) {
+      io.to(`user:${uid}`).emit('followed_host_online', {
+        hostId: host.id, hostName: host.name,
+      });
+    }
+  }
+
+  await setex(cooldownKey, 300, '1');
+}
+
 // ─── Per-call server-side wallet watch ───────────────────────────────────────
 // Prevents calls from running past wallet balance even if Flutter client dies.
 const callCheckIntervals = new Map();
@@ -118,6 +158,8 @@ const initSocket = (io) => {
       query('UPDATE hosts SET is_online = TRUE WHERE user_id = $1', [userId]).catch(() => {});
       socket.join('hosts');
       socket.broadcast.emit('host_online', { userId });
+      // Notify followers (5-min cooldown prevents spam on rapid reconnects)
+      notifyFollowersOnline(io, userId).catch(() => {});
     }
 
     // ─── CHAT EVENTS ────────────────────────────────────────────────────
@@ -348,4 +390,4 @@ const initSocket = (io) => {
 
 const getOnlineUsers = () => onlineUsers;
 
-module.exports = { initSocket, getOnlineUsers, startWalletCheck, stopWalletCheck };
+module.exports = { initSocket, getOnlineUsers, startWalletCheck, stopWalletCheck, notifyFollowersOnline };

@@ -6,6 +6,7 @@ const router = require('express').Router();
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const { query, withTransaction } = require('../config/database');
+const { getRedisClient } = require('../config/redis');
 const logger = require('../config/logger');
 const notifService = require('../modules/notifications/notification.service');
 
@@ -515,6 +516,163 @@ router.get('/api/analytics/revenue', adminAuth, async (req, res) => {
     ORDER BY date ASC
   `);
   res.json({ success: true, data: rows });
+});
+
+// ── Call Type breakdown (last 30 days) ───────────────────────────────────────
+router.get('/api/analytics/call-types', adminAuth, async (req, res) => {
+  const { rows } = await query(`
+    SELECT call_type, COUNT(*)::int AS count
+    FROM calls
+    WHERE status = 'ended' AND created_at > NOW() - INTERVAL '30 days'
+    GROUP BY call_type
+  `);
+  const result = { audio: 0, video: 0 };
+  rows.forEach((r) => { result[r.call_type] = r.count; });
+  res.json({ success: true, data: result });
+});
+
+// ── Revenue CSV export ────────────────────────────────────────────────────────
+router.get('/api/analytics/revenue.csv', async (req, res) => {
+  // Accept token as query param (browser window.open can't set headers)
+  const token = req.query.token;
+  if (!token) return res.status(401).send('Unauthorized');
+  try {
+    const secret = process.env.ADMIN_SECRET || 'admin_secret_change_me';
+    jwt.verify(token, secret);
+  } catch {
+    return res.status(401).send('Invalid or expired token');
+  }
+
+  const { rows } = await query(`
+    SELECT
+      DATE(created_at) AS date,
+      COUNT(*)::int    AS call_count,
+      COALESCE(SUM(amount_charged), 0) AS revenue,
+      COALESCE(SUM(host_earnings),  0) AS host_earnings
+    FROM calls
+    WHERE status = 'ended' AND created_at > NOW() - INTERVAL '30 days'
+    GROUP BY DATE(created_at)
+    ORDER BY date DESC
+  `);
+
+  const lines = ['Date,Calls,Gross Revenue (INR),Host Earnings (INR),Platform Take (INR)'];
+  rows.forEach((r) => {
+    const platform = (parseFloat(r.revenue) - parseFloat(r.host_earnings)).toFixed(2);
+    lines.push(`${r.date},${r.call_count},${parseFloat(r.revenue).toFixed(2)},${parseFloat(r.host_earnings).toFixed(2)},${platform}`);
+  });
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="socialcall-revenue.csv"');
+  res.send(lines.join('\n'));
+});
+
+// ── Platform health check ─────────────────────────────────────────────────────
+router.get('/api/health', adminAuth, async (req, res) => {
+  // DB check
+  let dbOk = false;
+  try { await query('SELECT 1'); dbOk = true; } catch { dbOk = false; }
+
+  // Redis check
+  let redisOk = false;
+  try {
+    const rc = await getRedisClient();
+    await rc.ping();
+    redisOk = true;
+  } catch { redisOk = false; }
+
+  // Online users from socket map
+  let onlineUsers = 0;
+  let onlineHosts = 0;
+  try {
+    const { getOnlineUsers } = require('../socket/socket');
+    onlineUsers = getOnlineUsers().size;
+    const { rows } = await query('SELECT COUNT(*) FROM hosts WHERE is_online = TRUE');
+    onlineHosts = parseInt(rows[0].count);
+  } catch { /* socket not yet initialised */ }
+
+  res.json({ success: true, data: { db: dbOk, redis: redisOk, onlineUsers, onlineHosts } });
+});
+
+// ── Reviews management ────────────────────────────────────────────────────────
+router.get('/api/reviews', adminAuth, async (req, res) => {
+  const { page = 1, limit = 20, search } = req.query;
+  const offset = (Number(page) - 1) * Number(limit);
+  const conditions = [];
+  const params = [];
+
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(ur.name ILIKE $${params.length} OR uh.name ILIKE $${params.length})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(Number(limit), offset);
+
+  const { rows } = await query(`
+    SELECT rv.id, rv.rating, rv.comment, rv.created_at,
+           rv.host_id,
+           ur.name AS reviewer_name, ur.phone AS reviewer_phone,
+           uh.name AS host_name,
+           c.duration_seconds AS call_duration
+    FROM reviews rv
+    JOIN users ur ON ur.id = rv.user_id
+    JOIN hosts h  ON h.id  = rv.host_id
+    JOIN users uh ON uh.id = h.user_id
+    LEFT JOIN calls c ON c.id = rv.call_id
+    ${where}
+    ORDER BY rv.created_at DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length}
+  `, params);
+
+  const countRes = await query(`
+    SELECT COUNT(*) FROM reviews rv
+    JOIN users ur ON ur.id = rv.user_id
+    JOIN hosts h  ON h.id  = rv.host_id
+    JOIN users uh ON uh.id = h.user_id
+    ${where}
+  `, params.slice(0, -2));
+
+  res.json({ success: true, data: rows, total: parseInt(countRes.rows[0].count) });
+});
+
+router.delete('/api/reviews/:id', adminAuth, async (req, res) => {
+  const { rows } = await query('DELETE FROM reviews WHERE id = $1 RETURNING host_id', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ success: false, message: 'Review not found' });
+
+  // Recalculate host rating after deletion
+  const { updateHostRating } = require('../modules/hosts/hosts.service');
+  await updateHostRating(rows[0].host_id);
+
+  logger.info('Admin deleted review', { reviewId: req.params.id, hostId: rows[0].host_id });
+  res.json({ success: true, message: 'Review deleted' });
+});
+
+// ── Push Broadcast ────────────────────────────────────────────────────────────
+router.post('/api/push/broadcast', adminAuth, async (req, res) => {
+  const { title, body, target = 'all', data = {} } = req.body || {};
+  if (!title || !body) {
+    return res.status(400).json({ success: false, message: 'title and body are required' });
+  }
+
+  let whereClause;
+  if (target === 'hosts')   whereClause = 'WHERE is_active = TRUE AND is_host = TRUE AND fcm_token IS NOT NULL';
+  else if (target === 'callers') whereClause = 'WHERE is_active = TRUE AND is_host = FALSE AND fcm_token IS NOT NULL';
+  else whereClause = 'WHERE is_active = TRUE AND fcm_token IS NOT NULL'; // all
+
+  const { rows } = await query(`SELECT id FROM users ${whereClause}`);
+  const userIds = rows.map((r) => r.id);
+
+  if (!userIds.length) {
+    return res.json({ success: true, message: 'No devices found for target', sent: 0 });
+  }
+
+  await notifService.sendToMultiple(userIds, {
+    title,
+    body,
+    data: { type: 'broadcast', ...data },
+  });
+
+  logger.info('Admin push broadcast', { target, userCount: userIds.length, title });
+  res.json({ success: true, message: `Notification sent to ${userIds.length} devices`, sent: userIds.length });
 });
 
 module.exports = router;

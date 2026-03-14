@@ -206,6 +206,9 @@
       <button class="nav-item" data-tab="calls" onclick="switchTab('calls')">
         <span class="nav-icon">📞</span> Calls
       </button>
+      <button class="nav-item" data-tab="reviews" onclick="switchTab('reviews')">
+        <span class="nav-icon">⭐</span> Reviews
+      </button>
       <button class="nav-item" data-tab="payouts" onclick="switchTab('payouts')">
         <span class="nav-icon">💸</span> Payouts
         <span class="nav-badge red" id="badge-payouts" style="display:none;"></span>
@@ -218,6 +221,9 @@
       </button>
       <button class="nav-item" data-tab="offers" onclick="switchTab('offers')">
         <span class="nav-icon">🎁</span> Offers
+      </button>
+      <button class="nav-item" data-tab="push" onclick="switchTab('push')">
+        <span class="nav-icon">📢</span> Push
       </button>
       <button class="nav-item" data-tab="analytics" onclick="switchTab('analytics')">
         <span class="nav-icon">📈</span> Analytics
@@ -504,8 +510,81 @@
           </div>
         </div>
         <div class="chart-card">
-          <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:20px;">30-Day Revenue Table</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+            <div style="font-size:14px;font-weight:700;color:#fff;">30-Day Revenue Table</div>
+            <button class="btn-ghost" onclick="exportRevenueCSV()" style="font-size:12px;padding:7px 14px;display:flex;align-items:center;gap:6px;">⬇ Export CSV</button>
+          </div>
           <div id="analyticsTable"></div>
+        </div>
+      </div>
+
+      <!-- ── REVIEWS ─────────────────────────────────────────────────────── -->
+      <div id="tab-reviews" class="tab-pane">
+        <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
+          <input id="reviewSearch" type="text" placeholder="🔍  Search reviewer or host name…" style="flex:1;min-width:200px;"/>
+          <button class="btn-primary" onclick="loadReviews()">Search</button>
+        </div>
+        <div class="chart-card" style="padding:0;overflow:hidden;">
+          <div id="reviewsTableWrap"><div style="padding:40px;text-align:center;color:#4040700;font-size:13px;" class="pulse">Loading reviews…</div></div>
+        </div>
+        <div id="reviewsPagination" style="display:flex;justify-content:center;gap:10px;margin-top:16px;"></div>
+      </div>
+
+      <!-- ── PUSH ──────────────────────────────────────────────────────────── -->
+      <div id="tab-push" class="tab-pane">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+          <!-- Broadcast form -->
+          <div class="chart-card">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+              <div style="width:38px;height:38px;background:#6C63FF18;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;border:1px solid #6C63FF30;">📢</div>
+              <div>
+                <div style="font-size:14px;font-weight:700;color:#fff;">Broadcast Notification</div>
+                <div style="font-size:11px;color:#5050800;">Send FCM push to users</div>
+              </div>
+            </div>
+            <div style="margin-bottom:12px;">
+              <label>Title</label>
+              <input id="pushTitle" type="text" placeholder="e.g. 🎉 Special offer today!"/>
+            </div>
+            <div style="margin-bottom:12px;">
+              <label>Message Body</label>
+              <textarea id="pushBody" rows="3" placeholder="e.g. Recharge now and get 20% bonus on all plans." style="resize:vertical;"></textarea>
+            </div>
+            <div style="margin-bottom:20px;">
+              <label>Target Audience</label>
+              <select id="pushTarget">
+                <option value="all">All Active Users</option>
+                <option value="callers">Callers Only (non-hosts)</option>
+                <option value="hosts">Hosts Only</option>
+              </select>
+            </div>
+            <button onclick="sendBroadcast()" style="width:100%;padding:11px;background:linear-gradient(135deg,#6C63FF,#8B85FF);border:none;color:#fff;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;" id="pushBtn">
+              📨 Send Notification
+            </button>
+          </div>
+
+          <!-- Info + history -->
+          <div>
+            <div class="chart-card" style="margin-bottom:16px;">
+              <div style="font-size:12px;font-weight:600;color:#6C63FF;margin-bottom:10px;">💡 Broadcast Tips</div>
+              <div style="font-size:12px;color:#6060a0;line-height:1.8;">
+                • Notifications are sent via Firebase FCM<br/>
+                • Only users with valid FCM tokens receive them<br/>
+                • <span style="color:#a78bfa;">All Users</span> includes both callers and hosts<br/>
+                • Use <span style="color:#a78bfa;">Callers Only</span> for recharge / call promotions<br/>
+                • Use <span style="color:#a78bfa;">Hosts Only</span> for policy or earning updates<br/>
+                • Avoid sending more than 2–3 broadcasts per day
+              </div>
+            </div>
+            <div class="chart-card">
+              <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:14px;">Recent Broadcasts</div>
+              <div id="pushHistory" style="max-height:300px;overflow-y:auto;">
+                <div style="font-size:12px;color:#4040700;text-align:center;padding:20px;">No broadcasts yet this session</div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -597,9 +676,11 @@ const tabs = {
   users:     { title:'Users',     sub:'Manage user accounts & wallets',   load: loadUsers },
   hosts:     { title:'Hosts',     sub:'Verify, promote & manage hosts',   load: loadHosts },
   calls:     { title:'Calls',     sub:'Full call history',                load: loadCalls },
+  reviews:   { title:'Reviews',   sub:'Moderate caller reviews',          load: loadReviews },
   payouts:   { title:'Payouts',   sub:'Process host payout requests',     load: loadPayouts },
   kyc:       { title:'KYC',       sub:'Identity verification requests',   load: loadKyc },
   offers:    { title:'Offers',    sub:'Promo codes & bulk wallet bonuses', load: loadOffers },
+  push:      { title:'Push',      sub:'Broadcast notifications to users', load: loadPush },
   analytics: { title:'Analytics', sub:'30-day revenue & call trends',     load: loadAnalytics },
 };
 
@@ -622,10 +703,12 @@ function refreshCurrent() {
 // ── Dashboard ────────────────────────────────────────────────────────────────
 async function loadDashboard() {
   try {
-    const [statsRes, revenueRes, callsRes] = await Promise.all([
+    const [statsRes, revenueRes, callsRes, callTypesRes, healthRes] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/analytics/revenue'),
       api('GET', '/api/calls?limit=6'),
+      api('GET', '/api/analytics/call-types'),
+      api('GET', '/api/health'),
     ]);
 
     const s = statsRes.data;
@@ -655,8 +738,8 @@ async function loadDashboard() {
     // Revenue chart
     buildRevenueChart(revenueRes.data);
 
-    // Call type chart (using calls data)
-    buildCallTypeChart(callsRes.data);
+    // Call type chart (30-day data from dedicated endpoint)
+    buildCallTypeChart(callTypesRes.data);
 
     // Recent calls
     $('recentCallsList').innerHTML = callsRes.data.length ? callsRes.data.map(c => `
@@ -675,15 +758,16 @@ async function loadDashboard() {
       </div>
     `).join('') : '<div style="padding:30px;text-align:center;color:#4040700;font-size:13px;">No calls yet</div>';
 
-    // Health panel
+    // Health panel (real DB + Redis + socket data)
+    const h = healthRes.data;
     $('healthList').innerHTML = `
       <div style="space-y:10px;">
-        ${healthRow('Database',    '✅','Connected','green')}
-        ${healthRow('API Server',  '✅','Running','green')}
-        ${healthRow('Hosts Online', s.hosts_online>0?'🟢':'🔴', `${s.hosts_online} online`, s.hosts_online>0?'green':'red')}
+        ${healthRow('Database',      h.db?'✅':'🔴',    h.db?'Connected':'Unreachable',       h.db?'green':'red')}
+        ${healthRow('Redis Cache',   h.redis?'✅':'🔴', h.redis?'Connected':'Unreachable',    h.redis?'green':'red')}
+        ${healthRow('API Server',    '✅',              'Running','green')}
+        ${healthRow('Users Online',  '🟢',              `${h.onlineUsers||0} active sockets`, 'green')}
+        ${healthRow('Hosts Online',  h.onlineHosts>0?'🟢':'🔴', `${h.onlineHosts||0} online`, h.onlineHosts>0?'green':'red')}
         ${healthRow('Pending Payouts', s.pending_payouts>0?'⚠️':'✅', s.pending_payouts>0?`${s.pending_payouts} pending`:'All clear', s.pending_payouts>0?'yellow':'green')}
-        ${healthRow('Active Promos','🎟️',`${s.active_promos} running`,'purple')}
-        ${healthRow('Unverified Hosts', s.unverified_hosts>0?'⚠️':'✅', `${s.unverified_hosts} to review`, s.unverified_hosts>0?'yellow':'green')}
       </div>
     `;
 
@@ -739,11 +823,11 @@ function buildRevenueChart(data) {
   });
 }
 
-function buildCallTypeChart(calls) {
+function buildCallTypeChart(ct) {
   const ctx = $('callTypeChart').getContext('2d');
   if (charts.callType) charts.callType.destroy();
-  const audio = calls.filter(c=>c.call_type==='audio').length;
-  const video = calls.filter(c=>c.call_type==='video').length;
+  const audio = ct.audio || 0;
+  const video = ct.video || 0;
   charts.callType = new Chart(ctx, {
     type: 'doughnut',
     data: {
@@ -1177,6 +1261,7 @@ async function loadAnalytics() {
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
         <div style="font-size:13px;color:#a0a0c0;">30-day total: <span style="color:#34d399;font-weight:700;">${fmtRs(grandTotal)}</span></div>
       </div>
+
       <div style="overflow-x:auto;"><table class="data-table">
         <thead><tr><th>Date</th><th>Calls</th><th>Gross Revenue</th><th>Host Earnings</th><th>Platform Take</th></tr></thead>
         <tbody>${data.slice().reverse().map(d=>{
@@ -1191,6 +1276,104 @@ async function loadAnalytics() {
         }).join('')}</tbody>
       </table></div>`;
   } catch(e) { $('analyticsTable').innerHTML=`<div style="padding:40px;text-align:center;color:#f87171;">Error: ${e.message}</div>`; }
+}
+
+// ── CSV Export ───────────────────────────────────────────────────────────────
+function exportRevenueCSV() {
+  window.open(`/admin/api/analytics/revenue.csv?token=${encodeURIComponent(TOKEN)}`);
+}
+
+// ── Reviews ──────────────────────────────────────────────────────────────────
+let _reviewsPage = 1;
+
+async function loadReviews(page) {
+  _reviewsPage = page || 1;
+  $('reviewsTableWrap').innerHTML = '<div style="padding:40px;text-align:center;color:#4040700;font-size:13px;" class="pulse">Loading…</div>';
+  try {
+    const params = new URLSearchParams({ page: _reviewsPage, limit: 20 });
+    const s = $('reviewSearch').value.trim();
+    if (s) params.set('search', s);
+    const { data, pagination } = await api('GET', `/api/reviews?${params}`);
+    if (!data.length) {
+      $('reviewsTableWrap').innerHTML = '<div style="padding:50px;text-align:center;color:#4040700;">No reviews found</div>';
+      $('reviewsPagination').innerHTML = '';
+      return;
+    }
+    const stars = n => '⭐'.repeat(Math.round(n||0)) + '☆'.repeat(5 - Math.round(n||0));
+    $('reviewsTableWrap').innerHTML = `<div style="overflow-x:auto;"><table class="data-table">
+      <thead><tr><th>Stars</th><th>Comment</th><th>Reviewer</th><th>Host</th><th>Date</th><th>Action</th></tr></thead>
+      <tbody>${data.map(r=>`<tr>
+        <td style="font-size:15px;white-space:nowrap;">${stars(r.rating)} <span style="font-size:12px;color:#fbbf24;font-weight:700;">${Number(r.rating||0).toFixed(1)}</span></td>
+        <td style="max-width:260px;color:#c0c0e0;">${esc(r.comment||'—')}</td>
+        <td>
+          <div style="font-weight:600;color:#e2e2f2;">${esc(r.reviewer_name||'—')}</div>
+          <code style="font-size:11px;color:#5050800;">${esc(r.reviewer_phone||'')}</code>
+        </td>
+        <td style="color:#a0a0c0;">${esc(r.host_name||'—')}</td>
+        <td style="color:#5050800;font-size:12px;">${fmtDate(r.created_at)}</td>
+        <td><button class="btn-danger" onclick="deleteReview(${r.id},'${esc(r.host_name||'')}')">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+    // Pagination
+    const p = pagination;
+    if (p && p.pages > 1) {
+      let btns = '';
+      for (let i = 1; i <= p.pages; i++) {
+        btns += `<button onclick="loadReviews(${i})" style="padding:6px 12px;border-radius:8px;border:1px solid ${i===_reviewsPage?'#6C63FF':'#2e2e50'};background:${i===_reviewsPage?'#6C63FF22':'transparent'};color:${i===_reviewsPage?'#a78bfa':'#7070a0'};cursor:pointer;font-size:12px;">${i}</button>`;
+      }
+      $('reviewsPagination').innerHTML = btns;
+    } else {
+      $('reviewsPagination').innerHTML = '';
+    }
+  } catch(e) { $('reviewsTableWrap').innerHTML = `<div style="padding:40px;text-align:center;color:#f87171;">Error: ${e.message}</div>`; }
+}
+
+async function deleteReview(id, hostName) {
+  if (!confirm(`Delete this review for host "${hostName}"? Host rating will be recalculated.`)) return;
+  try {
+    await api('DELETE', `/api/reviews/${id}`);
+    toast('Review deleted');
+    loadReviews(_reviewsPage);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ── Push Broadcast ────────────────────────────────────────────────────────────
+let _pushHistory = [];
+
+function loadPush() { renderPushHistory(); }
+
+function renderPushHistory() {
+  if (!_pushHistory.length) {
+    $('pushHistory').innerHTML = '<div style="font-size:12px;color:#4040700;text-align:center;padding:20px;">No broadcasts yet this session</div>';
+    return;
+  }
+  $('pushHistory').innerHTML = _pushHistory.slice().reverse().map(b => `
+    <div style="padding:10px;background:#16162a;border-radius:10px;margin-bottom:8px;border:1px solid #2e2e50;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <div style="font-weight:600;color:#e2e2f2;font-size:13px;">${esc(b.title)}</div>
+        <span style="font-size:11px;color:#10b981;font-weight:600;">📨 ${b.sent}</span>
+      </div>
+      <div style="font-size:12px;color:#6060a0;">${esc(b.body)}</div>
+      <div style="font-size:11px;color:#4040700;margin-top:4px;">${b.target} • ${b.time}</div>
+    </div>
+  `).join('');
+}
+
+async function sendBroadcast() {
+  const title  = $('pushTitle').value.trim();
+  const body   = $('pushBody').value.trim();
+  const target = $('pushTarget').value;
+  if (!title || !body) { toast('Title and body are required', 'error'); return; }
+  const btn = $('pushBtn'); btn.textContent = '📤 Sending…'; btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/push/broadcast', { title, body, target });
+    toast(`📨 Sent to ${r.sent} device${r.sent!==1?'s':''}`, 'success');
+    _pushHistory.push({ title, body, target, sent: r.sent, time: new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'}) });
+    renderPushHistory();
+    $('pushTitle').value = '';
+    $('pushBody').value  = '';
+  } catch(e) { toast(e.message, 'error'); }
+  finally { btn.textContent = '📨 Send Notification'; btn.disabled = false; }
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────

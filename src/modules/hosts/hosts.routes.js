@@ -7,6 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { query: dbQuery } = require('../../config/database');
+const { notifyFollowersOnline } = require('../../socket/socket');
 
 // ── Multer setup for KYC uploads ──────────────────────────────────────────────
 const kycUploadDir = path.join(__dirname, '..', '..', '..', 'uploads', 'kyc');
@@ -139,7 +140,16 @@ router.post('/profile', authenticate,
   ],
   async (req, res) => {
     const host = await svc.createHostProfile(req.user.id, req.body);
-    res.status(201).json({ success: true, message: 'Host profile created', data: host });
+
+    // Immediately go online — host is live as soon as they register
+    await svc.setOnlineStatus(req.user.id, true);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('host_online', { userId: req.user.id });
+      notifyFollowersOnline(io, req.user.id).catch(() => {});
+    }
+
+    res.status(201).json({ success: true, message: 'Host profile created', data: { ...host, is_online: true } });
   }
 );
 
@@ -156,12 +166,17 @@ router.patch('/status', authenticate, requireHost,
     validate,
   ],
   async (req, res) => {
+    const io = req.app.get('io');
     await svc.setOnlineStatus(req.user.id, req.body.isOnline);
+
     // Broadcast status change to all connected clients
-    req.app.get('io')?.emit('host_status_changed', {
-      userId: req.user.id,
-      isOnline: req.body.isOnline,
-    });
+    io?.emit('host_status_changed', { userId: req.user.id, isOnline: req.body.isOnline });
+
+    // Notify followers when host goes online (fire-and-forget)
+    if (req.body.isOnline) {
+      notifyFollowersOnline(io, req.user.id).catch(() => {});
+    }
+
     res.json({ success: true, message: `Status set to ${req.body.isOnline ? 'online' : 'offline'}` });
   }
 );
