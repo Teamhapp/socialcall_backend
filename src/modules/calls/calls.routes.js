@@ -3,7 +3,9 @@ const { body } = require('express-validator');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
 const { query } = require('../../config/database');
+const { get } = require('../../config/redis');
 const svc = require('./calls.service');
+const { startWalletCheck } = require('../../socket/socket');
 
 // GET /api/calls/ice-servers — returns ICE server config for WebRTC
 // Caller + host both fetch this before starting the peer connection.
@@ -89,21 +91,30 @@ router.post('/initiate', authenticate,
 
 // POST /api/calls/:callId/accept — host accepts the call via REST
 // After accepting, emit `call_connected` to the caller so their
-// WebRTC flow can begin.
+// WebRTC flow can begin.  Also starts the server-side wallet watch so
+// the call auto-ends if the caller's balance runs out.
 router.post('/:callId/accept', authenticate, async (req, res) => {
-  const result = await svc.acceptCall(req.params.callId, req.user.id);
+  const callId = req.params.callId;
+  const result = await svc.acceptCall(callId, req.user.id);
 
-  // ── Notify caller via Socket.IO ───────────────────────────────────────────
+  // ── Notify caller + start server-side wallet guard ────────────────────────
   const io = req.app.get('io');
   if (io) {
-    const callRes = await query('SELECT user_id FROM calls WHERE id = $1', [req.params.callId]);
+    const callRes = await query('SELECT user_id FROM calls WHERE id = $1', [callId]);
     const callerId = callRes.rows[0]?.user_id;
 
     if (callerId) {
       io.to(`user:${callerId}`).emit('call_connected', {
-        callId: req.params.callId,
+        callId,
         channelName: result.channelName,
       });
+
+      // Start server-side wallet check (auto-ends call when balance depletes).
+      // ratePerMin is cached in Redis by initiateCall.
+      const cached = await get(`call:${callId}`);
+      if (cached?.ratePerMin) {
+        startWalletCheck(io, callId, callerId, cached.ratePerMin);
+      }
     }
   }
 

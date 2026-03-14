@@ -348,4 +348,4 @@ const initSocket = (io) => {
 
 const getOnlineUsers = () => onlineUsers;
 
-module.exports = { initSocket, getOnlineUsers };
+module.exports = { initSocket, getOnlineUsers, startWalletCheck, stopWalletCheck };
