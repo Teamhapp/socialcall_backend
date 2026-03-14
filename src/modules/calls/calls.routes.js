@@ -1,11 +1,22 @@
 const router = require('express').Router();
 const { body } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
 const { query } = require('../../config/database');
 const { get } = require('../../config/redis');
 const svc = require('./calls.service');
 const { startWalletCheck } = require('../../socket/socket');
+
+// Per-user: max 3 call initiations per minute (prevents call spam)
+const initiateCallLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 3,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many call attempts. Please wait a moment.' },
+});
 
 // GET /api/calls/ice-servers — returns ICE server config for WebRTC
 // Caller + host both fetch this before starting the peer connection.
@@ -51,7 +62,7 @@ router.get('/ice-servers', authenticate, (req, res) => {
 // POST /api/calls/initiate — caller starts a call via REST
 // After creating the call record the handler also pushes an
 // `incoming_call` socket event to the host (exactly like call_request does).
-router.post('/initiate', authenticate,
+router.post('/initiate', authenticate, initiateCallLimiter,
   [
     body('hostId').notEmpty().withMessage('hostId required'),
     body('callType').isIn(['audio', 'video']).withMessage('callType must be audio or video'),

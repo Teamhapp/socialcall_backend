@@ -1,10 +1,39 @@
 const router = require('express').Router();
 const { body } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
 const { getOnlineUsers } = require('../../socket/socket');
 const { query } = require('../../config/database');
 const svc = require('./wallet.service');
+
+// Per-user rate limiters
+const orderLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,  // 10 min
+  max: 3,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many payment attempts. Please wait 10 minutes.' },
+});
+
+const giftLimiter = rateLimit({
+  windowMs: 60 * 1000,        // 1 min
+  max: 10,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Sending gifts too quickly. Please slow down.' },
+});
+
+const promoLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,  // 1 hour
+  max: 5,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many promo code attempts. Try again later.' },
+});
 
 // GET /api/wallet — get balance + stats
 router.get('/', authenticate, async (req, res) => {
@@ -13,7 +42,7 @@ router.get('/', authenticate, async (req, res) => {
 });
 
 // POST /api/wallet/order — create Razorpay order
-router.post('/order', authenticate,
+router.post('/order', authenticate, orderLimiter,
   [
     body('amount').isFloat({ min: 10 }).withMessage('Minimum recharge is ₹10'),
     validate,
@@ -53,7 +82,7 @@ router.get('/transactions', authenticate, async (req, res) => {
 });
 
 // POST /api/wallet/gift — send a gift
-router.post('/gift', authenticate,
+router.post('/gift', authenticate, giftLimiter,
   [
     body('hostId').notEmpty().withMessage('hostId required'),
     body('giftId').notEmpty().withMessage('giftId required'),
@@ -85,7 +114,7 @@ router.post('/gift', authenticate,
 );
 
 // POST /api/wallet/redeem-promo — redeem a promo code for wallet credit
-router.post('/redeem-promo', authenticate,
+router.post('/redeem-promo', authenticate, promoLimiter,
   [
     body('code').notEmpty().withMessage('Promo code is required'),
     validate,
