@@ -372,8 +372,11 @@
 
       <!-- ── PAYOUTS ─────────────────────────────────────────────────────────── -->
       <div id="tab-payouts" class="tab-pane">
-        <div style="display:flex;gap:10px;margin-bottom:20px;align-items:center;">
-          <select id="payoutStatus" style="width:160px;">
+        <!-- Stats row -->
+        <div id="payoutStats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;"></div>
+
+        <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;">
+          <select id="payoutStatus" style="width:160px;" onchange="loadPayouts()">
             <option value="pending">Pending</option>
             <option value="approved">Approved</option>
             <option value="rejected">Rejected</option>
@@ -1013,11 +1016,12 @@ async function loadCalls() {
 }
 
 // ── Payouts ──────────────────────────────────────────────────────────────────
-let _payoutsData = []; // cache for modal lookup
+let _payoutsData = [];
 
 function parsePayoutNotes(raw) {
   try { return JSON.parse(raw || '{}'); } catch { return {}; }
 }
+
 function paymentDestDisplay(notes) {
   if (!notes.paymentMethod) return '—';
   if (notes.paymentMethod === 'upi') return `UPI: ${notes.upiId || '—'}`;
@@ -1026,66 +1030,219 @@ function paymentDestDisplay(notes) {
   return parts.join(' / ');
 }
 
+function paymentDestCopyable(notes) {
+  if (!notes.paymentMethod) return '<span style="color:#5050800;">—</span>';
+  if (notes.paymentMethod === 'upi') {
+    const upi = esc(notes.upiId || '—');
+    return `<div style="display:flex;align-items:center;gap:6px;">
+      <span class="badge badge-purple" style="font-size:10px;">UPI</span>
+      <code style="font-size:12px;color:#a78bfa;">${upi}</code>
+      <button onclick="copyText('${esc(notes.upiId||'')}',this)" style="background:none;border:none;color:#5050800;cursor:pointer;font-size:13px;padding:0;" title="Copy">⎘</button>
+    </div>`;
+  }
+  const acct = esc(notes.accountNumber||'—');
+  const ifsc = esc(notes.ifsc||'—');
+  const name = esc(notes.accountHolder||'');
+  return `<div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
+      <span class="badge badge-blue" style="font-size:10px;">Bank</span>
+      <code style="font-size:12px;color:#60a5fa;">${acct}</code>
+      <button onclick="copyText('${esc(notes.accountNumber||'')}',this)" style="background:none;border:none;color:#5050800;cursor:pointer;font-size:13px;padding:0;" title="Copy">⎘</button>
+    </div>
+    <div style="font-size:11px;color:#6060a0;">IFSC: ${ifsc}${name?' • '+name:''}</div>
+  </div>`;
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓'; btn.style.color = '#10b981';
+    setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+  }).catch(() => toast('Copy failed','error'));
+}
+
 async function loadPayouts() {
   $('payoutsTableWrap').innerHTML = '<div style="padding:40px;text-align:center;color:#4040700;" class="pulse">Loading…</div>';
   try {
     const st = $('payoutStatus').value;
-    const { data } = await api('GET',`/api/payouts?status=${st}`);
+    const { data, summary } = await api('GET', `/api/payouts?status=${st}`);
     _payoutsData = data;
-    const total = data.reduce((a,p)=>a+Number(p.amount||0),0);
-    $('payoutSummary').textContent = data.length ? `${data.length} payout${data.length>1?'s':''} • Total: ${fmtRs(total)}` : '';
-    if (!data.length) { $('payoutsTableWrap').innerHTML=`<div style="padding:50px;text-align:center;color:#4040700;">No ${st} payouts</div>`; return; }
+
+    // Stats row (always reflects pending totals)
+    $('payoutStats').innerHTML = [
+      { label:'Pending Requests', value: fmtNum(summary.pending_count),          icon:'⏳', color:'red' },
+      { label:'Pending Amount',   value: fmtRs(summary.pending_total),            icon:'💸', color:'orange' },
+      { label:'Approved Today',   value: fmtNum(summary.approved_today),          icon:'✅', color:'green' },
+      { label:'Paid Today',       value: fmtRs(summary.approved_today_amount),    icon:'💰', color:'teal' },
+    ].map(c => statCard(c)).join('');
+
+    const total = data.reduce((a,p) => a + Number(p.amount||0), 0);
+    $('payoutSummary').textContent = data.length
+      ? `${data.length} ${st} payout${data.length>1?'s':''} • ${fmtRs(total)}`
+      : '';
+
+    if (!data.length) {
+      $('payoutsTableWrap').innerHTML = `<div style="padding:50px;text-align:center;color:#4040700;">No ${st} payouts</div>`;
+      return;
+    }
+
+    const isPending = st === 'pending';
     $('payoutsTableWrap').innerHTML = `<div style="overflow-x:auto;"><table class="data-table">
-      <thead><tr><th>Host</th><th>Amount</th><th>Payment Destination</th><th>Requested</th><th>Status</th><th>${st==='pending'?'Actions':'Reference'}</th></tr></thead>
-      <tbody>${data.map(p=>{
-        const notes = parsePayoutNotes(p.notes);
-        const dest = paymentDestDisplay(notes);
+      <thead><tr>
+        <th>Host</th><th>Amount</th><th>Payment Details</th>
+        <th>${isPending ? 'Requested' : 'Requested → Processed'}</th>
+        <th>Status</th>
+        <th>${isPending ? 'Actions' : 'Reference / Note'}</th>
+      </tr></thead>
+      <tbody>${data.map(p => {
+        const notes  = parsePayoutNotes(p.notes);
+        const destHtml = paymentDestCopyable(notes);
+        const adminNote = notes.adminNote ? `<div style="font-size:11px;color:#6060a0;margin-top:3px;">Note: ${esc(notes.adminNote)}</div>` : '';
         return `<tr>
-        <td>
-          <div style="font-weight:600;color:#e2e2f2;">${esc(p.host_name)}</div>
-          <code style="font-size:11px;color:#5050800;">${esc(p.host_phone)}</code>
-        </td>
-        <td style="color:#34d399;font-size:16px;font-weight:800;">${fmtRs(p.amount)}</td>
-        <td style="font-size:12px;color:#a0a0c0;font-family:monospace;">${esc(dest)}</td>
-        <td style="color:#7070a0;font-size:12px;">${fmtDate(p.requested_at)}</td>
-        <td><span class="badge ${callStatusBadge(p.status)||'badge-gray'}">${p.status}</span></td>
-        <td>${st==='pending'
-          ? `<div style="display:flex;gap:6px;"><button class="btn-success" onclick="showPayoutModal(${p.id},'approved')">✓ Approve</button><button class="btn-danger" onclick="showPayoutModal(${p.id},'rejected')">✕ Reject</button></div>`
-          : `<code style="font-size:11px;color:#7070a0;">${esc(p.reference_id||'—')}</code>`
-        }</td>
-      </tr>`;}).join('')}</tbody>
+          <td>
+            <div style="font-weight:600;color:#e2e2f2;">${esc(p.host_name)}</div>
+            <code style="font-size:11px;color:#5050800;">${esc(p.host_phone)}</code>
+            <div style="font-size:11px;color:#4040700;margin-top:2px;">${fmtNum(p.total_calls||0)} calls • ${fmtRs(p.total_earnings||0)} earned</div>
+          </td>
+          <td>
+            <div style="color:#34d399;font-size:16px;font-weight:800;">${fmtRs(p.amount)}</div>
+            <div style="font-size:11px;color:#5050800;">Pending: ${fmtRs(p.pending_earnings||0)}</div>
+          </td>
+          <td>${destHtml}</td>
+          <td style="color:#7070a0;font-size:12px;">
+            ${fmtDate(p.requested_at)}
+            ${p.processed_at ? `<br/><span style="color:#4040700;">→ ${fmtDate(p.processed_at)}</span>` : ''}
+          </td>
+          <td><span class="badge ${callStatusBadge(p.status)||'badge-gray'}">${p.status}</span></td>
+          <td>${isPending
+            ? `<div style="display:flex;gap:6px;">
+                <button class="btn-success" onclick="showPayoutModal(${p.id},'approved')">✓ Approve</button>
+                <button class="btn-danger"  onclick="showPayoutModal(${p.id},'rejected')">✕ Reject</button>
+               </div>`
+            : `<div>
+                <code style="font-size:11px;color:#7070a0;">${esc(p.reference_id||'—')}</code>
+                ${adminNote}
+               </div>`
+          }</td>
+        </tr>`;
+      }).join('')}</tbody>
     </table></div>`;
-  } catch(e) { $('payoutsTableWrap').innerHTML=`<div style="padding:40px;text-align:center;color:#f87171;">Error: ${e.message}</div>`; }
+  } catch(e) {
+    $('payoutsTableWrap').innerHTML = `<div style="padding:40px;text-align:center;color:#f87171;">Error: ${e.message}</div>`;
+  }
 }
 
 function showPayoutModal(id, action) {
   const p = _payoutsData.find(x => x.id === id) || {};
   const notes = parsePayoutNotes(p.notes);
-  const dest = paymentDestDisplay(notes);
   const isApprove = action === 'approved';
+
+  // Build payment details block
+  let detailRows = '';
+  if (notes.paymentMethod === 'upi') {
+    detailRows = `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2e2e50;">
+        <span style="font-size:12px;color:#6060a0;">Method</span>
+        <span class="badge badge-purple">UPI</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+        <span style="font-size:12px;color:#6060a0;">UPI ID</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <code style="font-size:13px;color:#a78bfa;">${esc(notes.upiId||'—')}</code>
+          <button onclick="copyText('${esc(notes.upiId||'')}',this)" style="background:none;border:none;color:#5050800;cursor:pointer;font-size:15px;padding:0;" title="Copy">⎘</button>
+        </div>
+      </div>`;
+  } else if (notes.paymentMethod === 'bank') {
+    detailRows = `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2e2e50;">
+        <span style="font-size:12px;color:#6060a0;">Method</span>
+        <span class="badge badge-blue">Bank Transfer</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2e2e50;">
+        <span style="font-size:12px;color:#6060a0;">Account No.</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <code style="font-size:13px;color:#60a5fa;">${esc(notes.accountNumber||'—')}</code>
+          <button onclick="copyText('${esc(notes.accountNumber||'')}',this)" style="background:none;border:none;color:#5050800;cursor:pointer;font-size:15px;padding:0;" title="Copy">⎘</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #2e2e50;">
+        <span style="font-size:12px;color:#6060a0;">IFSC</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <code style="font-size:13px;color:#60a5fa;">${esc(notes.ifsc||'—')}</code>
+          <button onclick="copyText('${esc(notes.ifsc||'')}',this)" style="background:none;border:none;color:#5050800;cursor:pointer;font-size:15px;padding:0;" title="Copy">⎘</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;">
+        <span style="font-size:12px;color:#6060a0;">Account Holder</span>
+        <span style="font-size:13px;color:#e2e2f2;">${esc(notes.accountHolder||'—')}</span>
+      </div>`;
+  } else {
+    detailRows = `<div style="padding:12px;text-align:center;color:#5050800;font-size:12px;">No payment details provided</div>`;
+  }
+
   $('modalContent').innerHTML = `
-    <div class="modal-title">${isApprove?'✅ Approve':'❌ Reject'} Payout — ${esc(p.host_name||'')}</div>
-    <div style="background:#0f0f1e;border:1px solid #2e2e50;border-radius:10px;padding:14px;margin-bottom:16px;">
-      <div style="font-size:10px;font-weight:700;color:#5050800;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;">Send Money To</div>
-      <div style="font-size:13px;color:#e2e2f2;font-family:monospace;word-break:break-all;">${esc(dest)}</div>
-      <div style="font-size:12px;color:#6060a0;margin-top:4px;">${esc(p.host_name||'')} • ${fmtRs(p.amount||0)}</div>
+    <div class="modal-title">${isApprove ? '✅ Approve Payout' : '❌ Reject Payout'}</div>
+
+    <!-- Host + amount summary -->
+    <div style="display:flex;align-items:center;justify-content:space-between;background:#0f0f1e;border:1px solid #2e2e50;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+      <div>
+        <div style="font-weight:700;color:#fff;">${esc(p.host_name||'')}</div>
+        <div style="font-size:11px;color:#5050800;margin-top:2px;">${fmtNum(p.total_calls||0)} calls • ${fmtRs(p.total_earnings||0)} total earned</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:22px;font-weight:800;color:#34d399;">${fmtRs(p.amount||0)}</div>
+        <div style="font-size:11px;color:#5050800;">Pending balance: ${fmtRs(p.pending_earnings||0)}</div>
+      </div>
     </div>
-    ${isApprove?`<div style="margin-bottom:14px;"><label>UTR / Reference ID</label><input id="m_ref" type="text" placeholder="UTR number or transaction ID"/></div>`:''}
-    <div style="margin-bottom:20px;"><label>Notes (optional)</label><input id="m_notes" type="text" placeholder="${isApprove?'Payment via NEFT/UPI':'Reason for rejection'}"/></div>
+
+    <!-- Payment details -->
+    <div style="background:#0f0f1e;border:1px solid #2e2e50;border-radius:10px;padding:4px 14px;margin-bottom:14px;">
+      ${detailRows}
+    </div>
+
+    ${isApprove ? `
+    <div style="margin-bottom:12px;">
+      <label>UTR / Reference ID <span style="color:#ef4444;">*</span></label>
+      <input id="m_ref" type="text" placeholder="UTR number or transaction ID" autofocus/>
+    </div>
+    <div style="margin-bottom:18px;">
+      <label>Admin Note (optional)</label>
+      <input id="m_notes" type="text" placeholder="e.g. Paid via NEFT on 14 Mar"/>
+    </div>` : `
+    <div style="margin-bottom:18px;">
+      <label>Rejection Reason <span style="color:#ef4444;">*</span></label>
+      <textarea id="m_notes" rows="3" placeholder="e.g. Invalid UPI ID / account details mismatch…" style="resize:none;"></textarea>
+    </div>`}
+
     <div style="display:flex;gap:10px;">
       <button class="btn-ghost" onclick="closeModal()" style="flex:1;padding:11px;">Cancel</button>
-      <button style="flex:1;padding:11px;background:${isApprove?'linear-gradient(135deg,#10b981,#059669)':'linear-gradient(135deg,#ef4444,#dc2626)'};border:none;color:#fff;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;" onclick="submitPayout(${id},'${action}')">
-        ${isApprove?'Mark as Paid':'Reject Payout'}
+      <button id="m_submit" style="flex:1;padding:11px;background:${isApprove?'linear-gradient(135deg,#10b981,#059669)':'linear-gradient(135deg,#ef4444,#dc2626)'};border:none;color:#fff;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;"
+        onclick="submitPayout(${id},'${action}')">
+        ${isApprove ? '✓ Mark as Paid' : '✕ Reject Payout'}
       </button>
     </div>`;
-  $('modalOverlay').style.display='flex';
+  $('modalOverlay').style.display = 'flex';
+  // Focus first input
+  setTimeout(() => { const el = document.getElementById('m_ref') || document.getElementById('m_notes'); if(el) el.focus(); }, 50);
 }
 
 async function submitPayout(id, status) {
-  const ref   = document.getElementById('m_ref')   ? $('m_ref').value   : '';
-  const notes = document.getElementById('m_notes') ? $('m_notes').value : '';
-  try { const r=await api('PATCH',`/api/payouts/${id}`,{status,reference_id:ref,notes}); toast(r.message,status==='approved'?'success':'warn'); closeModal(); loadPayouts(); }
-  catch(e) { toast(e.message,'error'); }
+  const isApprove = status === 'approved';
+  const ref   = document.getElementById('m_ref')   ? $('m_ref').value.trim()   : '';
+  const notes = document.getElementById('m_notes') ? $('m_notes').value.trim() : '';
+  if (isApprove && !ref) { toast('UTR / Reference ID is required', 'error'); $('m_ref').focus(); return; }
+  if (!isApprove && !notes) { toast('Rejection reason is required', 'error'); $('m_notes').focus(); return; }
+  const btn = $('m_submit'); btn.textContent = 'Processing…'; btn.disabled = true;
+  try {
+    const r = await api('PATCH', `/api/payouts/${id}`, { status, reference_id: ref, notes });
+    toast(r.message, isApprove ? 'success' : 'warn');
+    closeModal();
+    loadPayouts();
+  } catch(e) {
+    toast(e.message, 'error');
+    btn.textContent = isApprove ? '✓ Mark as Paid' : '✕ Reject Payout';
+    btn.disabled = false;
+  }
 }
 
 // ── KYC ───────────────────────────────────────────────────────────────────────

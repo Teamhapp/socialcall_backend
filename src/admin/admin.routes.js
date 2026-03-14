@@ -246,16 +246,28 @@ router.get('/api/calls', adminAuth, async (req, res) => {
 // ── Payouts ───────────────────────────────────────────────────────────────────
 router.get('/api/payouts', adminAuth, async (req, res) => {
   const { status = 'pending' } = req.query;
-  const { rows } = await query(`
-    SELECT p.*, u.name AS host_name, u.phone AS host_phone
-    FROM payouts p
-    JOIN hosts h ON h.id = p.host_id
-    JOIN users u ON u.id = h.user_id
-    WHERE p.status = $1
-    ORDER BY p.requested_at DESC
-    LIMIT 100
-  `, [status]);
-  res.json({ success: true, data: rows });
+  const [dataRes, summaryRes] = await Promise.all([
+    query(`
+      SELECT p.*,
+        u.name AS host_name, u.phone AS host_phone,
+        h.total_earnings, h.pending_earnings, h.total_calls
+      FROM payouts p
+      JOIN hosts h ON h.id = p.host_id
+      JOIN users u ON u.id = h.user_id
+      WHERE p.status = $1
+      ORDER BY p.requested_at DESC
+      LIMIT 100
+    `, [status]),
+    query(`
+      SELECT
+        COUNT(*)::int                                   AS pending_count,
+        COALESCE(SUM(amount), 0)::numeric               AS pending_total,
+        (SELECT COUNT(*)::int   FROM payouts WHERE status='approved' AND processed_at::date = CURRENT_DATE) AS approved_today,
+        (SELECT COALESCE(SUM(amount),0)::numeric FROM payouts WHERE status='approved' AND processed_at::date = CURRENT_DATE) AS approved_today_amount
+      FROM payouts WHERE status='pending'
+    `),
+  ]);
+  res.json({ success: true, data: dataRes.rows, summary: summaryRes.rows[0] });
 });
 
 router.patch('/api/payouts/:id', adminAuth, async (req, res) => {
