@@ -14,7 +14,10 @@ const getConversations = async (userId) => {
       (SELECT COUNT(*) FROM messages m2
        WHERE m2.sender_id = other_user_id AND m2.receiver_id = $1 AND m2.is_read = FALSE
       ) AS unread_count,
-      h.is_online
+      h.is_online,
+      h.id AS host_id,
+      h.audio_rate_per_min,
+      h.video_rate_per_min
     FROM (
       SELECT *,
         CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END AS other_user_id
