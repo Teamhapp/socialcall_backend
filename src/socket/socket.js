@@ -326,6 +326,13 @@ const initSocket = (io) => {
         : rows[0].caller_id;
     };
 
+    // BUG 1 FIX: Host emits webrtc_ready once its listeners are live.
+    // Server relays it to the caller so the caller knows it's safe to send the offer.
+    socket.on('webrtc_ready', async ({ callId }) => {
+      const targetId = await getOtherParty(callId).catch(() => null);
+      if (targetId) io.to(`user:${targetId}`).emit('webrtc_ready', { callId });
+    });
+
     socket.on('webrtc_offer', async ({ callId, sdp }) => {
       const targetId = await getOtherParty(callId).catch(() => null);
       if (targetId) io.to(`user:${targetId}`).emit('webrtc_offer', { callId, sdp });
