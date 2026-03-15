@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS kyc_documents (
   selfie_url     TEXT,
   status         VARCHAR(20) NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','approved','rejected')),
-  rejection_note TEXT,
+  rejection_reason TEXT,
   submitted_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   reviewed_at    TIMESTAMP WITH TIME ZONE
 );

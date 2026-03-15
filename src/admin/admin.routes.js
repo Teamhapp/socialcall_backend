@@ -410,7 +410,8 @@ router.get('/api/kyc', adminAuth, async (req, res) => {
   try {
     const validStatuses = ['pending', 'approved', 'rejected', 'all'];
     const statusFilter = validStatuses.includes(status) ? status : 'pending';
-    const where = statusFilter === 'all' ? '' : `WHERE k.status = '${statusFilter}'`;
+    const params = [];
+    const where = statusFilter === 'all' ? '' : (params.push(statusFilter), 'WHERE k.status = $1');
     const { rows } = await query(`
       SELECT k.id, k.host_id, k.document_type, k.front_url, k.back_url, k.selfie_url,
              k.status, k.rejection_reason, k.submitted_at, k.reviewed_at,
@@ -422,7 +423,7 @@ router.get('/api/kyc', adminAuth, async (req, res) => {
       ${where}
       ORDER BY k.submitted_at DESC
       LIMIT 100
-    `);
+    `, params);
     res.json({ success: true, data: rows });
   } catch {
     res.json({ success: true, data: [], _note: 'Run node scripts/migrate.js to enable KYC' });
