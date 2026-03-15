@@ -35,7 +35,7 @@ const getWallet = async (userId) => {
     FROM users u
     LEFT JOIN transactions t ON t.user_id = u.id AND t.status = 'completed'
     WHERE u.id = $1
-    GROUP BY u.wallet_balance
+    GROUP BY u.id, u.wallet_balance
   `, [userId]);
 
   return rows[0];
