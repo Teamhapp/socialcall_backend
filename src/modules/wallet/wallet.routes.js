@@ -3,7 +3,6 @@ const { body } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
-const { getOnlineUsers } = require('../../socket/socket');
 const { query } = require('../../config/database');
 const svc = require('./wallet.service');
 
@@ -91,21 +90,20 @@ router.post('/gift', authenticate, giftLimiter,
   async (req, res) => {
     const result = await svc.sendGift(req.user.id, req.body.hostId, req.body.giftId);
 
-    // Notify host in real-time via socket
+    // Notify host in real-time via socket.
+    // BUG FIX: use the persistent room `user:{hostUserId}` instead of the raw
+    // socketId from onlineUsers.  Rooms survive reconnects; a stale socketId
+    // would silently drop the event if the host reconnected since last lookup.
     try {
       const io = req.app.get('io');
       const { rows } = await query('SELECT user_id FROM hosts WHERE id = $1', [req.body.hostId]);
       if (io && rows[0]) {
         const hostUserId = rows[0].user_id;
-        const onlineUsers = getOnlineUsers();
-        const socketId = onlineUsers.get(String(hostUserId));
-        if (socketId) {
-          io.to(socketId).emit('gift_received', {
-            senderName: req.user.name,
-            gift: result.gift,
-            amount: result.amountDeducted * 0.65,
-          });
-        }
+        io.to(`user:${hostUserId}`).emit('gift_received', {
+          senderName: req.user.name,
+          gift: result.gift,
+          amount: result.amountDeducted * 0.65,
+        });
       }
     } catch (_) { /* best-effort */ }
 
