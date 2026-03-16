@@ -134,4 +134,70 @@ router.get('/gifts', async (req, res) => {
   res.json({ success: true, data: rows });
 });
 
+// GET /api/wallet/referral — get user's referral code + stats
+router.get('/referral', authenticate, async (req, res) => {
+  const { rows } = await query(
+    `SELECT u.referral_code,
+      (SELECT COUNT(*) FROM users WHERE referred_by = u.id) AS referral_count,
+      (SELECT COALESCE(SUM(amount),0) FROM transactions
+        WHERE user_id = u.id AND type = 'referral_bonus') AS total_earned
+     FROM users u WHERE u.id = $1`,
+    [req.user.id]
+  );
+  res.json({ success: true, data: rows[0] });
+});
+
+// POST /api/wallet/referral/apply — apply a referral code (one-time per user)
+router.post('/referral/apply',
+  authenticate,
+  [body('code').notEmpty().withMessage('Referral code is required'), validate],
+  async (req, res) => {
+    // Already used referral
+    const selfRes = await query('SELECT referred_by, referral_code FROM users WHERE id = $1', [req.user.id]);
+    if (selfRes.rows[0]?.referred_by) {
+      return res.status(409).json({ success: false, message: 'You have already used a referral code.' });
+    }
+
+    const code = req.body.code.toUpperCase().trim();
+    // Can't use own code
+    if (selfRes.rows[0]?.referral_code === code) {
+      return res.status(400).json({ success: false, message: 'You cannot use your own referral code.' });
+    }
+
+    const refRes = await query('SELECT id FROM users WHERE referral_code = $1', [code]);
+    if (!refRes.rows[0]) {
+      return res.status(404).json({ success: false, message: 'Invalid referral code.' });
+    }
+    const referrerId = refRes.rows[0].id;
+
+    // Credit ₹50 to both parties
+    const BONUS = 50;
+    await query('UPDATE users SET referred_by = $1 WHERE id = $2', [referrerId, req.user.id]);
+
+    // Credit new user
+    const newUserRes = await query(
+      'UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance',
+      [BONUS, req.user.id]
+    );
+    await query(
+      `INSERT INTO transactions (user_id, type, status, amount, is_credit, balance_after, description)
+       VALUES ($1, 'referral_bonus', 'completed', $2, TRUE, $3, 'Referral sign-up bonus')`,
+      [req.user.id, BONUS, newUserRes.rows[0].wallet_balance]
+    );
+
+    // Credit referrer
+    const referrerRes = await query(
+      'UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance',
+      [BONUS, referrerId]
+    );
+    await query(
+      `INSERT INTO transactions (user_id, type, status, amount, is_credit, balance_after, description)
+       VALUES ($1, 'referral_bonus', 'completed', $2, TRUE, $3, 'Referral friend bonus')`,
+      [referrerId, BONUS, referrerRes.rows[0].wallet_balance]
+    );
+
+    res.json({ success: true, message: `₹${BONUS} coins credited to your wallet!` });
+  }
+);
+
 module.exports = router;

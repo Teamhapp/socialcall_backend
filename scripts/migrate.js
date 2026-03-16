@@ -272,6 +272,65 @@ const migrate = async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_kyc_host ON kyc_documents(host_id);`);
     console.log('  ✅ kyc_documents');
 
+    // ── Fix payouts.status ENUM → VARCHAR (safe no-op if already VARCHAR) ─────
+    await client.query(`
+      DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'payouts' AND column_name = 'status'
+            AND data_type = 'USER-DEFINED'
+        ) THEN
+          ALTER TABLE payouts ALTER COLUMN status TYPE VARCHAR(20) USING status::TEXT;
+          DROP TYPE IF EXISTS payout_status CASCADE;
+        END IF;
+      END $$;
+    `);
+    console.log('  ✅ payouts (status VARCHAR fix)');
+
+    // ── Referral system ───────────────────────────────────────────────────────
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(10) UNIQUE;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT REFERENCES users(id);`);
+    // Seed referral codes for existing users who don't have one
+    await client.query(`
+      UPDATE users SET referral_code = UPPER(SUBSTRING(MD5(id::TEXT || 'sc') FROM 1 FOR 8))
+      WHERE referral_code IS NULL;
+    `);
+    console.log('  ✅ users (referral_code, referred_by)');
+
+    // ── Live Streams ──────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS live_streams (
+        id            BIGSERIAL PRIMARY KEY,
+        host_id       BIGINT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        room_name     VARCHAR(100) UNIQUE NOT NULL,
+        title         VARCHAR(200),
+        viewer_count  INT NOT NULL DEFAULT 0,
+        gift_count    INT NOT NULL DEFAULT 0,
+        status        VARCHAR(20) NOT NULL DEFAULT 'live',
+        started_at    TIMESTAMPTZ DEFAULT NOW(),
+        ended_at      TIMESTAMPTZ
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_streams_status ON live_streams(status);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_streams_host ON live_streams(host_id);`);
+    console.log('  ✅ live_streams');
+
+    // ── Subscriptions ─────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id          BIGSERIAL PRIMARY KEY,
+        user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        host_id     BIGINT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+        amount      DECIMAL(10,2) NOT NULL DEFAULT 99,
+        expires_at  TIMESTAMPTZ NOT NULL,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, host_id)
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_host ON subscriptions(host_id);`);
+    console.log('  ✅ subscriptions');
+
     // ── Indexes for performance ───────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_is_online ON hosts(is_online);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_hosts_rating ON hosts(rating DESC);`);

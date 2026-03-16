@@ -348,6 +348,85 @@ const initSocket = (io) => {
       if (targetId) io.to(`user:${targetId}`).emit('webrtc_ice_candidate', { callId, candidate });
     });
 
+    // ─── LIVE STREAM EVENTS ───────────────────────────────────────────────
+
+    // Join/leave stream room for real-time events
+    socket.on('join_stream', ({ streamId }) => {
+      socket.join(`stream_${streamId}`);
+    });
+
+    socket.on('leave_stream', ({ streamId }) => {
+      socket.leave(`stream_${streamId}`);
+    });
+
+    // stream_comment — relay comment to all stream viewers
+    socket.on('stream_comment', ({ streamId, text }) => {
+      if (!streamId || !text) return;
+      io.to(`stream_${streamId}`).emit('stream_comment', {
+        streamId,
+        userId,
+        name: socket.userName,
+        text: text.slice(0, 200),
+        ts: Date.now(),
+      });
+    });
+
+    // stream_gift — deduct coins from user, credit host, broadcast to stream room
+    socket.on('stream_gift', async (data, ack) => {
+      try {
+        const { streamId, giftId } = data;
+        if (!streamId || !giftId) return ack?.({ error: 'Missing streamId or giftId' });
+
+        // Fetch gift price + stream + host
+        const giftRes = await query('SELECT * FROM gifts WHERE id = $1 AND is_active = TRUE', [giftId]);
+        if (!giftRes.rows[0]) return ack?.({ error: 'Gift not found' });
+        const gift = giftRes.rows[0];
+
+        const streamRes = await query(
+          "SELECT ls.*, h.user_id AS host_user_id FROM live_streams ls JOIN hosts h ON h.id = ls.host_id WHERE ls.id = $1 AND ls.status = 'live'",
+          [streamId]
+        );
+        if (!streamRes.rows[0]) return ack?.({ error: 'Stream not found or not live' });
+        const stream = streamRes.rows[0];
+
+        // Deduct from sender wallet
+        const walletRes = await query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+        const balance = parseFloat(walletRes.rows[0]?.wallet_balance || 0);
+        if (balance < gift.price) return ack?.({ error: 'Insufficient balance' });
+
+        const newBalance = balance - gift.price;
+        await query('UPDATE users SET wallet_balance = $1 WHERE id = $2', [newBalance, userId]);
+        await query(
+          `INSERT INTO transactions (user_id, type, status, amount, is_credit, balance_after, description)
+           VALUES ($1, 'stream_gift', 'completed', $2, FALSE, $3, $4)`,
+          [userId, gift.price, newBalance, `Stream gift: ${gift.name}`]
+        );
+
+        // Credit host (65%)
+        const hostEarnings = parseFloat((gift.price * 0.65).toFixed(2));
+        await query(
+          'UPDATE hosts SET total_earnings = total_earnings + $1, pending_earnings = pending_earnings + $1 WHERE user_id = $2',
+          [hostEarnings, stream.host_user_id]
+        );
+
+        // Increment stream gift count
+        await query('UPDATE live_streams SET gift_count = gift_count + 1 WHERE id = $1', [streamId]);
+
+        // Broadcast to stream room
+        io.to(`stream_${streamId}`).emit('stream_gift_received', {
+          streamId,
+          senderName: socket.userName,
+          gift: { id: gift.id, name: gift.name, emoji: gift.emoji },
+          amount: gift.price,
+        });
+
+        ack?.({ success: true });
+      } catch (err) {
+        logger.error('stream_gift error', { userId, err: err.message });
+        ack?.({ error: err.message || 'Failed to send gift' });
+      }
+    });
+
     // ─── DISCONNECT ───────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
       onlineUsers.delete(userId);

@@ -123,70 +123,6 @@ router.post(
   }
 );
 
-// GET /api/hosts/:id — single host profile
-router.get('/:id', optionalAuth, async (req, res) => {
-  const host = await svc.getHostById(req.params.id, req.user?.id);
-  res.json({ success: true, data: host });
-});
-
-// POST /api/hosts/profile — create host profile (auth required)
-router.post('/profile', authenticate,
-  [
-    body('bio').optional().isLength({ max: 500 }),
-    body('languages').isArray({ min: 1 }).withMessage('At least one language required'),
-    body('audioRate').isFloat({ min: 5, max: 500 }).withMessage('Audio rate must be ₹5-500'),
-    body('videoRate').isFloat({ min: 10, max: 1000 }).withMessage('Video rate must be ₹10-1000'),
-    validate,
-  ],
-  async (req, res) => {
-    const host = await svc.createHostProfile(req.user.id, req.body);
-
-    // Immediately go online — host is live as soon as they register
-    await svc.setOnlineStatus(req.user.id, true);
-    const io = req.app.get('io');
-    if (io) {
-      io.emit('host_online', { userId: req.user.id });
-      notifyFollowersOnline(io, req.user.id).catch(() => {});
-    }
-
-    res.status(201).json({ success: true, message: 'Host profile created', data: { ...host, is_online: true } });
-  }
-);
-
-// PUT /api/hosts/profile — update host profile
-router.put('/profile', authenticate, requireHost, async (req, res) => {
-  const host = await svc.updateHostProfile(req.user.id, req.body);
-  res.json({ success: true, data: host });
-});
-
-// PATCH /api/hosts/status — go online/offline
-router.patch('/status', authenticate, requireHost,
-  [
-    body('isOnline').isBoolean().withMessage('isOnline must be boolean'),
-    validate,
-  ],
-  async (req, res) => {
-    const io = req.app.get('io');
-    await svc.setOnlineStatus(req.user.id, req.body.isOnline);
-
-    // Broadcast status change to all connected clients
-    io?.emit('host_status_changed', { userId: req.user.id, isOnline: req.body.isOnline });
-
-    // Notify followers when host goes online (fire-and-forget)
-    if (req.body.isOnline) {
-      notifyFollowersOnline(io, req.user.id).catch(() => {});
-    }
-
-    res.json({ success: true, message: `Status set to ${req.body.isOnline ? 'online' : 'offline'}` });
-  }
-);
-
-// POST /api/hosts/:id/follow — follow / unfollow
-router.post('/:id/follow', authenticate, async (req, res) => {
-  const result = await svc.toggleFollow(req.user.id, req.params.id);
-  res.json({ success: true, ...result });
-});
-
 // GET /api/hosts/payouts — host's own payout history
 router.get('/payouts', authenticate, requireHost, async (req, res) => {
   const hostRes = await dbQuery('SELECT id FROM hosts WHERE user_id = $1', [req.user.id]);
@@ -267,6 +203,70 @@ router.post('/payout', authenticate, requireHost, async (req, res) => {
     success: true,
     message: `Payout of ₹${amount.toFixed(2)} requested! We'll process it in 3–5 business days.`,
   });
+});
+
+// GET /api/hosts/:id — single host profile
+router.get('/:id', optionalAuth, async (req, res) => {
+  const host = await svc.getHostById(req.params.id, req.user?.id);
+  res.json({ success: true, data: host });
+});
+
+// POST /api/hosts/profile — create host profile (auth required)
+router.post('/profile', authenticate,
+  [
+    body('bio').optional().isLength({ max: 500 }),
+    body('languages').isArray({ min: 1 }).withMessage('At least one language required'),
+    body('audioRate').isFloat({ min: 5, max: 500 }).withMessage('Audio rate must be ₹5-500'),
+    body('videoRate').isFloat({ min: 10, max: 1000 }).withMessage('Video rate must be ₹10-1000'),
+    validate,
+  ],
+  async (req, res) => {
+    const host = await svc.createHostProfile(req.user.id, req.body);
+
+    // Immediately go online — host is live as soon as they register
+    await svc.setOnlineStatus(req.user.id, true);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('host_online', { userId: req.user.id });
+      notifyFollowersOnline(io, req.user.id).catch(() => {});
+    }
+
+    res.status(201).json({ success: true, message: 'Host profile created', data: { ...host, is_online: true } });
+  }
+);
+
+// PUT /api/hosts/profile — update host profile
+router.put('/profile', authenticate, requireHost, async (req, res) => {
+  const host = await svc.updateHostProfile(req.user.id, req.body);
+  res.json({ success: true, data: host });
+});
+
+// PATCH /api/hosts/status — go online/offline
+router.patch('/status', authenticate, requireHost,
+  [
+    body('isOnline').isBoolean().withMessage('isOnline must be boolean'),
+    validate,
+  ],
+  async (req, res) => {
+    const io = req.app.get('io');
+    await svc.setOnlineStatus(req.user.id, req.body.isOnline);
+
+    // Broadcast status change to all connected clients
+    io?.emit('host_status_changed', { userId: req.user.id, isOnline: req.body.isOnline });
+
+    // Notify followers when host goes online (fire-and-forget)
+    if (req.body.isOnline) {
+      notifyFollowersOnline(io, req.user.id).catch(() => {});
+    }
+
+    res.json({ success: true, message: `Status set to ${req.body.isOnline ? 'online' : 'offline'}` });
+  }
+);
+
+// POST /api/hosts/:id/follow — follow / unfollow
+router.post('/:id/follow', authenticate, async (req, res) => {
+  const result = await svc.toggleFollow(req.user.id, req.params.id);
+  res.json({ success: true, ...result });
 });
 
 module.exports = router;

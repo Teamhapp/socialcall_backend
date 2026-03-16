@@ -2,12 +2,15 @@ const logger = require('../config/logger');
 
 // ─── Global error handler (put last in app.js) ──────────────────────────────
 const errorHandler = (err, req, res, next) => {
-  logger.error('Unhandled error', {
-    message: err.message,
-    stack: err.stack,
+  const status = err.status || err.statusCode || 500;
+  // 4xx errors are expected application flows (bad input, not found, etc.)
+  // — log at warn level. Only 5xx are true server errors → error level.
+  const logFn = status < 500 ? logger.warn.bind(logger) : logger.error.bind(logger);
+  logFn('Unhandled error ' + err.message, {
     url: req.url,
     method: req.method,
     userId: req.user?.id,
+    ...(status >= 500 ? { stack: err.stack } : {}),
   });
 
   // Validation errors (express-validator)
@@ -25,7 +28,6 @@ const errorHandler = (err, req, res, next) => {
     return res.status(400).json({ success: false, message: 'Invalid reference' });
   }
 
-  const status = err.status || err.statusCode || 500;
   const message = process.env.NODE_ENV === 'production'
     ? (status < 500 ? err.message : 'Internal server error')
     : err.message;
