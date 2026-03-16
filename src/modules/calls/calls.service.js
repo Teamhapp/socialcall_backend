@@ -101,8 +101,12 @@ const endCall = async (callId, endedBy) => {
     const durationSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
     const durationMinutes = durationSeconds / 60;
 
-    // Grace period: calls under 10 seconds are free (network glitch / accidental connect)
-    const GRACE_PERIOD_SECONDS = 10;
+    // Grace period: calls under 60 seconds are free.
+    // This covers failed WebRTC connections — the ICE negotiation can take up to
+    // 38 s (8 s webrtc_ready wait + 30 s ICE timeout) before the call is ended.
+    // Without a long grace period, users would be charged for calls that never
+    // actually connected at the audio/video level.
+    const GRACE_PERIOD_SECONDS = 60;
     let amountRounded = 0;
     if (durationSeconds >= GRACE_PERIOD_SECONDS) {
       const amountCharged = Math.min(
