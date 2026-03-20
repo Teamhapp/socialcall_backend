@@ -1,13 +1,24 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/database');
-const { setex, get, del } = require('../config/redis');
+const { getRedisClient, setex, get, del } = require('../config/redis');
 const chatService = require('../modules/chat/chat.service');
 const callsService = require('../modules/calls/calls.service');
 const notifService = require('../modules/notifications/notification.service');
 const logger = require('../config/logger');
 
-// Track online users: userId → socketId
+// Track online users: userId → socketId (in-process Map for fast sync checks)
 const onlineUsers = new Map();
+
+// Flush stale online:* keys left over from a previous server run
+getRedisClient().then(client =>
+  client.eval(
+    "local keys = redis.call('keys', ARGV[1]) if #keys > 0 then redis.call('del', unpack(keys)) end return #keys",
+    { keys: [], arguments: ['online:*'] }
+  ).catch(() => {})
+).catch(() => {});
+
+// Async check — works cross-instance (reads Redis)
+const isUserOnline = async (userId) => !!(await get(`online:${userId}`).catch(() => null));
 
 // ─── Notify followers that a host just came online (called by socket + REST) ──
 // Uses a 5-minute Redis cooldown so rapid reconnects don't spam followers.
@@ -146,8 +157,9 @@ const initSocket = (io) => {
     const { userId } = socket;
     logger.info('Socket connected', { userId, socketId: socket.id });
 
-    // Track online
+    // Track online (Map for fast in-process checks; Redis for cross-instance)
     onlineUsers.set(userId, socket.id);
+    setex(`online:${userId}`, 7200, socket.id).catch(() => {});
     socket.join(`user:${userId}`);
 
     // Queue last_seen update (batched every 30s — non-blocking)
@@ -392,6 +404,7 @@ const initSocket = (io) => {
     // ─── DISCONNECT ───────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
       onlineUsers.delete(userId);
+      del(`online:${userId}`).catch(() => {});
       _lastSeenPending.add(userId); // Batched — non-blocking
 
       if (socket.isHost) {
@@ -438,4 +451,4 @@ const initSocket = (io) => {
 
 const getOnlineUsers = () => onlineUsers;
 
-module.exports = { initSocket, getOnlineUsers, startWalletCheck, stopWalletCheck, notifyFollowersOnline };
+module.exports = { initSocket, getOnlineUsers, isUserOnline, startWalletCheck, stopWalletCheck, notifyFollowersOnline };

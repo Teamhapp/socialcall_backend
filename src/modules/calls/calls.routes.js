@@ -6,7 +6,7 @@ const { authenticate } = require('../../middleware/auth');
 const { query } = require('../../config/database');
 const { get } = require('../../config/redis');
 const svc = require('./calls.service');
-const { startWalletCheck, getOnlineUsers } = require('../../socket/socket');
+const { startWalletCheck, isUserOnline } = require('../../socket/socket');
 const notifService = require('../notifications/notification.service');
 
 // Per-user: max 3 call initiations per minute (prevents call spam)
@@ -51,8 +51,7 @@ router.post('/initiate', authenticate, initiateCallLimiter,
         const callerRes = await query('SELECT name, avatar FROM users WHERE id = $1', [req.user.id]);
         const caller = callerRes.rows[0];
 
-        const onlineUsers = getOnlineUsers();
-        if (onlineUsers.has(hostUserId)) {
+        if (await isUserOnline(hostUserId)) {
           io.to(`user:${hostUserId}`).emit('incoming_call', {
             callId: result.callId,
             callType: req.body.callType,
