@@ -6,7 +6,8 @@ const { authenticate } = require('../../middleware/auth');
 const { query } = require('../../config/database');
 const { get } = require('../../config/redis');
 const svc = require('./calls.service');
-const { startWalletCheck } = require('../../socket/socket');
+const { startWalletCheck, getOnlineUsers } = require('../../socket/socket');
+const notifService = require('../notifications/notification.service');
 
 // Per-user: max 3 call initiations per minute (prevents call spam)
 const initiateCallLimiter = rateLimit({
@@ -18,45 +19,12 @@ const initiateCallLimiter = rateLimit({
   message: { success: false, message: 'Too many call attempts. Please wait a moment.' },
 });
 
-// GET /api/calls/ice-servers — returns ICE server config for WebRTC
-// Caller + host both fetch this before starting the peer connection.
-// Configure TURN via Replit Secrets: TURN_URL, TURN_USERNAME, TURN_CREDENTIAL
-// (optional — Google STUN servers are always included as baseline)
-router.get('/ice-servers', authenticate, (req, res) => {
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-  ];
-
-  // Add TURN server if configured — required for calls on 4G/mobile data
-  const turnUrl        = process.env.TURN_URL;
-  const turnUsername   = process.env.TURN_USERNAME;
-  const turnCredential = process.env.TURN_CREDENTIAL;
-
-  if (turnUrl) {
-    iceServers.push({ urls: turnUrl, username: turnUsername, credential: turnCredential });
-    // Also add TCP fallback (port 443) for restrictive firewalls
-    if (turnUrl.includes(':3478')) {
-      iceServers.push({
-        urls: turnUrl.replace(':3478', ':443').replace('turn:', 'turns:'),
-        username: turnUsername,
-        credential: turnCredential,
-      });
-    }
-  } else {
-    // No TURN configured — use Metered open relay as a free fallback.
-    // Works for most networks. Sign up at https://metered.ca for a
-    // dedicated TURN server and set TURN_URL / TURN_USERNAME / TURN_CREDENTIAL.
-    iceServers.push(
-      { urls: 'turn:openrelay.metered.ca:80',       username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443',      username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turns:openrelay.metered.ca:443',     username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    );
-  }
-
-  res.json({ success: true, data: iceServers });
+// GET /api/calls/:callId/agora-token — returns Agora RTC token for the call.
+// Both caller and host call this to get their channel credentials.
+// Requires AGORA_APP_ID + AGORA_APP_CERTIFICATE in environment.
+router.get('/:callId/agora-token', authenticate, async (req, res) => {
+  const result = await svc.getAgoraToken(req.params.callId, req.user.id);
+  res.json({ success: true, data: result });
 });
 
 // POST /api/calls/initiate — caller starts a call via REST
@@ -83,16 +51,31 @@ router.post('/initiate', authenticate, initiateCallLimiter,
         const callerRes = await query('SELECT name, avatar FROM users WHERE id = $1', [req.user.id]);
         const caller = callerRes.rows[0];
 
-        io.to(`user:${hostUserId}`).emit('incoming_call', {
-          callId: result.callId,
-          callType: req.body.callType,
-          channelName: result.channelName,
-          caller: {
-            id: req.user.id,
-            name: caller?.name || 'Unknown',
-            avatar: caller?.avatar || null,
-          },
-        });
+        const onlineUsers = getOnlineUsers();
+        if (onlineUsers.has(hostUserId)) {
+          io.to(`user:${hostUserId}`).emit('incoming_call', {
+            callId: result.callId,
+            callType: req.body.callType,
+            channelName: result.channelName,
+            caller: {
+              id: req.user.id,
+              name: caller?.name || 'Unknown',
+              avatar: caller?.avatar || null,
+            },
+          });
+        } else {
+          // Host is offline — send FCM push so they get a heads-up notification
+          await notifService.sendToUser(hostUserId, {
+            title: '📞 Incoming Call!',
+            body: `${caller?.name || 'Someone'} is calling you`,
+            data: {
+              type:       'call',
+              callId:     String(result.callId),
+              callType:   req.body.callType,
+              callerName: caller?.name || '',
+            },
+          }).catch(() => {});
+        }
       }
     }
 

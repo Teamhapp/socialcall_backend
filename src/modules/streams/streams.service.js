@@ -1,18 +1,20 @@
 const { query } = require('../../config/database');
-const { AccessToken } = require('livekit-server-sdk');
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
 
-const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || '';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
+const AGORA_APP_ID  = process.env.AGORA_APP_ID  || '';
+const AGORA_APP_CERT = process.env.AGORA_APP_CERTIFICATE || '';
 
-// ── Token generator ───────────────────────────────────────────────────────────
-const generateToken = (roomName, identity, name, canPublish) => {
-  const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-    identity,
-    name,
-    ttl: 4 * 60 * 60, // 4 hours
-  });
-  token.addGrant({ roomJoin: true, room: roomName, canPublish, canSubscribe: true });
-  return token.toJwt();
+// ── Agora RTC token ────────────────────────────────────────────────────────────
+const generateToken = (channelName, uid, canPublish) => {
+  if (!AGORA_APP_ID || !AGORA_APP_CERT) {
+    throw Object.assign(new Error('Agora credentials not configured on server'), { status: 503 });
+  }
+  const role     = canPublish ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
+  const expireTs = Math.floor(Date.now() / 1000) + 4 * 3600; // 4 h
+  return RtcTokenBuilder.buildTokenWithUid(
+    AGORA_APP_ID, AGORA_APP_CERT,
+    channelName, uid, role, expireTs, expireTs
+  );
 };
 
 // ── Go live ───────────────────────────────────────────────────────────────────
@@ -27,18 +29,18 @@ const goLive = async (hostUserId, title) => {
     [hostId]
   );
 
-  const roomName = `stream_${hostId}_${Date.now()}`;
+  // Channel name doubles as the Agora channel (≤64 chars, alphanumeric + _)
+  const channelName = `stream_${hostId}_${Date.now()}`;
   const { rows } = await query(
     `INSERT INTO live_streams (host_id, room_name, title, status)
      VALUES ($1, $2, $3, 'live') RETURNING *`,
-    [hostId, roomName, title || 'Live Stream']
+    [hostId, channelName, title || 'Live Stream']
   );
 
-  const userRes = await query('SELECT name FROM users WHERE id = $1', [hostUserId]);
-  const hostName = userRes.rows[0]?.name || 'Host';
-  const token = await generateToken(roomName, `host_${hostUserId}`, hostName, true);
+  const uid   = Math.abs(parseInt(hostUserId)) % 4294967295 || 1;
+  const token = generateToken(channelName, uid, true);
 
-  return { stream: rows[0], token, livekitUrl: process.env.LIVEKIT_URL };
+  return { stream: rows[0], token, channelName, uid, appId: AGORA_APP_ID };
 };
 
 // ── End stream ────────────────────────────────────────────────────────────────
@@ -72,7 +74,10 @@ const listStreams = async () => {
 // ── Viewer join token ──────────────────────────────────────────────────────────
 const getViewerToken = async (streamId, viewerUserId, viewerName) => {
   const { rows } = await query(
-    "SELECT * FROM live_streams WHERE id = $1 AND status = 'live'",
+    `SELECT ls.*, h.user_id AS host_user_id
+       FROM live_streams ls
+       JOIN hosts h ON h.id = ls.host_id
+      WHERE ls.id = $1 AND ls.status = 'live'`,
     [streamId]
   );
   if (!rows[0]) throw Object.assign(new Error('Stream not found or not live'), { status: 404 });
@@ -82,8 +87,19 @@ const getViewerToken = async (streamId, viewerUserId, viewerName) => {
     [streamId]
   );
 
-  const token = await generateToken(rows[0].room_name, `viewer_${viewerUserId}`, viewerName, false);
-  return { token, roomName: rows[0].room_name, livekitUrl: process.env.LIVEKIT_URL, stream: rows[0] };
+  const channelName = rows[0].room_name;
+  const hostUid     = Math.abs(parseInt(rows[0].host_user_id)) % 4294967295 || 1;
+  const viewerUid   = Math.abs(parseInt(viewerUserId)) % 4294967295 || 2;
+  const token       = generateToken(channelName, viewerUid, false);
+
+  return {
+    token,
+    channelName,
+    uid:     viewerUid,
+    hostUid,
+    appId:  AGORA_APP_ID,
+    stream: rows[0],
+  };
 };
 
 // ── Viewer leave ──────────────────────────────────────────────────────────────

@@ -2,8 +2,41 @@ const { v4: uuidv4 } = require('uuid');
 const { query, withTransaction } = require('../../config/database');
 const { setex, get, del } = require('../../config/redis');
 const logger = require('../../config/logger');
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
 
-const COMMISSION = parseInt(process.env.PLATFORM_COMMISSION_PERCENT) || 35;
+const COMMISSION   = parseInt(process.env.PLATFORM_COMMISSION_PERCENT) || 35;
+const AGORA_APP_ID = process.env.AGORA_APP_ID || '';
+const AGORA_APP_CERT = process.env.AGORA_APP_CERTIFICATE || '';
+
+// ─── Agora RTC Token ───────────────────────────────────────────────────────────
+const getAgoraToken = async (callId, userId) => {
+  if (!AGORA_APP_ID || !AGORA_APP_CERT) {
+    throw { status: 503, message: 'Agora credentials not configured on server' };
+  }
+
+  const callRes = await query(
+    `SELECT c.channel_name, c.user_id AS caller_id, h.user_id AS host_user_id
+       FROM calls c JOIN hosts h ON h.id = c.host_id
+      WHERE c.id = $1 AND c.status IN ('ringing', 'connected')`,
+    [callId]
+  );
+  const call = callRes.rows[0];
+  if (!call) throw { status: 404, message: 'Call not found or already ended' };
+
+  if (userId !== call.caller_id && userId !== call.host_user_id) {
+    throw { status: 403, message: 'Access denied' };
+  }
+
+  const uid = Math.abs(parseInt(userId)) % 4294967295 || 1;
+  const expireTs = Math.floor(Date.now() / 1000) + 3600;
+  const token = RtcTokenBuilder.buildTokenWithUid(
+    AGORA_APP_ID, AGORA_APP_CERT,
+    call.channel_name, uid, RtcRole.PUBLISHER,
+    expireTs, expireTs
+  );
+
+  return { token, channelName: call.channel_name, uid, appId: AGORA_APP_ID };
+};
 
 // ─── Initiate Call ─────────────────────────────────────────────────────────────
 const initiateCall = async (userId, hostId, callType) => {
@@ -227,4 +260,4 @@ const submitReview = async (callId, userId, { rating, comment }) => {
   });
 };
 
-module.exports = { initiateCall, acceptCall, endCall, getCallHistory, getHostCallHistory, submitReview };
+module.exports = { initiateCall, acceptCall, endCall, getCallHistory, getHostCallHistory, submitReview, getAgoraToken };

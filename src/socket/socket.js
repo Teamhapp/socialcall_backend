@@ -310,44 +310,6 @@ const initSocket = (io) => {
       logger.info('Wallet low during call', { userId, callId, balance });
     });
 
-    // ─── WEBRTC SIGNALING ────────────────────────────────────────────────
-    // These events are relayed to the other party in the call.
-    // The server looks up both participants from callId and forwards.
-
-    const getOtherParty = async (callId) => {
-      const { rows } = await query(
-        `SELECT c.user_id AS caller_id, h.user_id AS host_user_id
-           FROM calls c JOIN hosts h ON h.id = c.host_id
-          WHERE c.id = $1`, [callId]
-      );
-      if (!rows[0]) return null;
-      return userId === rows[0].caller_id
-        ? rows[0].host_user_id
-        : rows[0].caller_id;
-    };
-
-    // BUG 1 FIX: Host emits webrtc_ready once its listeners are live.
-    // Server relays it to the caller so the caller knows it's safe to send the offer.
-    socket.on('webrtc_ready', async ({ callId }) => {
-      const targetId = await getOtherParty(callId).catch(() => null);
-      if (targetId) io.to(`user:${targetId}`).emit('webrtc_ready', { callId });
-    });
-
-    socket.on('webrtc_offer', async ({ callId, sdp }) => {
-      const targetId = await getOtherParty(callId).catch(() => null);
-      if (targetId) io.to(`user:${targetId}`).emit('webrtc_offer', { callId, sdp });
-    });
-
-    socket.on('webrtc_answer', async ({ callId, sdp }) => {
-      const targetId = await getOtherParty(callId).catch(() => null);
-      if (targetId) io.to(`user:${targetId}`).emit('webrtc_answer', { callId, sdp });
-    });
-
-    socket.on('webrtc_ice_candidate', async ({ callId, candidate }) => {
-      const targetId = await getOtherParty(callId).catch(() => null);
-      if (targetId) io.to(`user:${targetId}`).emit('webrtc_ice_candidate', { callId, candidate });
-    });
-
     // ─── LIVE STREAM EVENTS ───────────────────────────────────────────────
 
     // Join/leave stream room for real-time events
