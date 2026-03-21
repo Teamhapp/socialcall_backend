@@ -593,15 +593,17 @@ router.get('/api/health', adminAuth, async (req, res) => {
     redisOk = true;
   } catch { redisOk = false; }
 
-  // Online users from socket map
+  // Online users from Redis presence keys + DB for hosts
   let onlineUsers = 0;
   let onlineHosts = 0;
   try {
-    const { getOnlineUsers } = require('../socket/socket');
-    onlineUsers = getOnlineUsers().size;
+    const { getRedisClient } = require('../config/redis');
+    const client = await getRedisClient();
+    const keys = await client.keys('online:*');
+    onlineUsers = keys.length;
     const { rows } = await query('SELECT COUNT(*) FROM hosts WHERE is_online = TRUE');
     onlineHosts = parseInt(rows[0].count);
-  } catch { /* socket not yet initialised */ }
+  } catch { /* redis not yet initialised */ }
 
   res.json({ success: true, data: { db: dbOk, redis: redisOk, onlineUsers, onlineHosts } });
 });

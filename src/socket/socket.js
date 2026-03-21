@@ -6,9 +6,6 @@ const callsService = require('../modules/calls/calls.service');
 const notifService = require('../modules/notifications/notification.service');
 const logger = require('../config/logger');
 
-// Track online users: userId → socketId (in-process Map for fast sync checks)
-const onlineUsers = new Map();
-
 // Flush stale online:* keys left over from a previous server run
 getRedisClient().then(client =>
   client.eval(
@@ -40,7 +37,8 @@ async function notifyFollowersOnline(io, hostUserId) {
   if (!followerIds.length) return;
 
   // Push to followers who are offline; emit socket event to online followers.
-  const offlineIds = followerIds.filter(id => !onlineUsers.has(id));
+  const onlineStatuses = await Promise.all(followerIds.map(id => isUserOnline(id)));
+  const offlineIds = followerIds.filter((_, i) => !onlineStatuses[i]);
   if (offlineIds.length) {
     await notifService.sendToMultiple(offlineIds, {
       title: `💜 ${host.name} is now online!`,
@@ -49,9 +47,9 @@ async function notifyFollowersOnline(io, hostUserId) {
     });
   }
 
-  for (const uid of followerIds) {
-    if (onlineUsers.has(uid)) {
-      io.to(`user:${uid}`).emit('followed_host_online', {
+  for (let i = 0; i < followerIds.length; i++) {
+    if (onlineStatuses[i]) {
+      io.to(`user:${followerIds[i]}`).emit('followed_host_online', {
         hostId: host.id, hostName: host.name,
       });
     }
@@ -157,8 +155,7 @@ const initSocket = (io) => {
     const { userId } = socket;
     logger.info('Socket connected', { userId, socketId: socket.id });
 
-    // Track online (Map for fast in-process checks; Redis for cross-instance)
-    onlineUsers.set(userId, socket.id);
+    // Track presence in Redis (cross-instance safe)
     setex(`online:${userId}`, 7200, socket.id).catch(() => {});
     socket.join(`user:${userId}`);
 
@@ -193,7 +190,7 @@ const initSocket = (io) => {
         ack?.({ success: true, message });
 
         // Push notification if receiver is offline
-        if (!onlineUsers.has(receiverId)) {
+        if (!await isUserOnline(receiverId)) {
           await notifService.sendToUser(receiverId, {
             title: socket.userName,
             body: messageType === 'gift' ? `${socket.userName} sent you a gift 🎁` : content.slice(0, 80),
@@ -228,7 +225,7 @@ const initSocket = (io) => {
         const hostRes = await query('SELECT user_id FROM hosts WHERE id = $1', [hostId]);
         const hostUserId = hostRes.rows[0]?.user_id;
 
-        if (hostUserId && onlineUsers.has(hostUserId)) {
+        if (hostUserId && await isUserOnline(hostUserId)) {
           io.to(`user:${hostUserId}`).emit('incoming_call', {
             callId: result.callId,
             callType,
@@ -295,19 +292,38 @@ const initSocket = (io) => {
         const result = await callsService.endCall(callId, userId);
 
         // Notify both parties
-        const callRes = await query('SELECT user_id, host_id FROM calls WHERE id = $1', [callId]);
+        const callRes = await query(`
+          SELECT c.user_id, c.host_id,
+                 u.name  AS caller_name,
+                 hu.name AS host_name,
+                 h.user_id AS host_user_id
+          FROM calls c
+          JOIN users u  ON u.id  = c.user_id
+          JOIN hosts h  ON h.id  = c.host_id
+          JOIN users hu ON hu.id = h.user_id
+          WHERE c.id = $1
+        `, [callId]);
         const call = callRes.rows[0];
         if (call) {
-          const hostRes = await query('SELECT user_id FROM hosts WHERE id = $1', [call.host_id]);
-          const hostUserId = hostRes.rows[0]?.user_id;
+          const hostUserId = call.host_user_id;
           io.to(`user:${call.user_id}`).to(`user:${hostUserId}`).emit('call_summary', {
             callId,
             ...result,
           });
-          // If call was never connected (ring-timeout / cancelled before answer)
-          // tell the host so their incoming-call overlay dismisses.
+          // If call was never connected (ring-timeout / cancelled before answer):
+          // dismiss host overlay + send missed-call FCM to both parties.
           if (result.durationSeconds === 0 && hostUserId) {
             io.to(`user:${hostUserId}`).emit('call_cancelled', { callId });
+            notifService.sendToUser(call.user_id, {
+              title: '📵 Call Not Answered',
+              body: `${call.host_name} couldn't take your call`,
+              data: { type: 'missed_call', callId },
+            }).catch(() => {});
+            notifService.sendToUser(hostUserId, {
+              title: '📞 Missed Call',
+              body: `You missed a call from ${call.caller_name}`,
+              data: { type: 'missed_call', callId },
+            }).catch(() => {});
           }
         }
 
@@ -403,7 +419,6 @@ const initSocket = (io) => {
 
     // ─── DISCONNECT ───────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
-      onlineUsers.delete(userId);
       del(`online:${userId}`).catch(() => {});
       _lastSeenPending.add(userId); // Batched — non-blocking
 
@@ -449,6 +464,4 @@ const initSocket = (io) => {
   return io;
 };
 
-const getOnlineUsers = () => onlineUsers;
-
-module.exports = { initSocket, getOnlineUsers, isUserOnline, startWalletCheck, stopWalletCheck, notifyFollowersOnline };
+module.exports = { initSocket, isUserOnline, startWalletCheck, stopWalletCheck, notifyFollowersOnline };

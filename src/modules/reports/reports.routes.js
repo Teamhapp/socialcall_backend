@@ -1,8 +1,18 @@
 const router = require('express').Router();
 const { body, query: qv } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
 const svc = require('./reports.service');
+
+const reportLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many reports submitted. Please wait before reporting again.' },
+});
 
 // ─── Admin auth helper (same pattern as admin.routes.js) ─────────────────────
 const adminAuth = (req, res, next) => {
@@ -16,6 +26,7 @@ const adminAuth = (req, res, next) => {
 // POST /api/reports — submit a report (user auth)
 router.post('/',
   authenticate,
+  reportLimiter,
   [
     body('targetType').isIn(['host', 'message', 'call']).withMessage('Invalid target type'),
     body('targetId').isUUID().withMessage('targetId must be a valid UUID'),
