@@ -2,9 +2,9 @@ const { query, withTransaction } = require('../../config/database');
 const { setex, get, del } = require('../../config/redis');
 
 // ─── List / Search Hosts ──────────────────────────────────────────────────────
-const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRate, sort = 'rating', search }) => {
-  // Cache only simple first-page queries (no search/price filter)
-  const isSimple = !search && !minRate && !maxRate && page === 1;
+const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRate, sort = 'rating', search, excludeUserId }) => {
+  // Cache only simple first-page queries (no search/price filter/user exclusion)
+  const isSimple = !search && !minRate && !maxRate && !excludeUserId && page === 1;
   const cacheKey = `hosts:list:${online || 'all'}:${language || 'any'}:${sort}:${limit}`;
   if (isSimple) {
     try {
@@ -16,6 +16,11 @@ const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRa
   const offset = (page - 1) * limit;
   const params = [];
   const conditions = ['h.is_active = TRUE'];
+
+  if (excludeUserId) {
+    params.push(excludeUserId);
+    conditions.push(`h.user_id != $${params.length}`);
+  }
 
   if (online === 'true') conditions.push('h.is_online = TRUE');
   if (language) {
@@ -235,8 +240,139 @@ const updateHostRating = async (hostId) => {
   `, [hostId]);
 };
 
+// ─── Host Analytics ───────────────────────────────────────────────────────────
+const getHostAnalytics = async (userId, period = '30d') => {
+  const { rows: hostRows } = await query('SELECT id FROM hosts WHERE user_id = $1', [userId]);
+  if (!hostRows[0]) throw { status: 404, message: 'Host not found' };
+  const hostId = hostRows[0].id;
+
+  const cacheKey = `host:analytics:${hostId}:${period}`;
+  try {
+    const cached = await get(cacheKey);
+    if (cached) return cached;
+  } catch (_) {}
+
+  const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
+  const since = `NOW() - INTERVAL '${days} days'`;
+
+  // Summary
+  const { rows: sumRows } = await query(`
+    SELECT
+      COUNT(*) AS total_calls,
+      COALESCE(SUM(host_earnings), 0) AS total_earnings,
+      COALESCE(SUM(duration_seconds), 0) AS total_seconds,
+      COALESCE(AVG(duration_seconds), 0) AS avg_duration_seconds
+    FROM calls
+    WHERE host_id = $1 AND status = 'ended' AND created_at >= ${since}
+  `, [hostId]);
+
+  // Repeat caller rate
+  const { rows: repeatRows } = await query(`
+    SELECT
+      COUNT(DISTINCT user_id) AS unique_callers,
+      COUNT(DISTINCT CASE WHEN cnt > 1 THEN user_id END) AS repeat_callers
+    FROM (
+      SELECT user_id, COUNT(*) AS cnt
+      FROM calls WHERE host_id = $1 AND status = 'ended' AND created_at >= ${since}
+      GROUP BY user_id
+    ) t
+  `, [hostId]);
+
+  // Call type breakdown
+  const { rows: typeRows } = await query(`
+    SELECT
+      call_type,
+      COUNT(*) AS count,
+      COALESCE(SUM(host_earnings), 0) AS earnings
+    FROM calls
+    WHERE host_id = $1 AND status = 'ended' AND created_at >= ${since}
+    GROUP BY call_type
+  `, [hostId]);
+
+  // Peak hours
+  const { rows: hourRows } = await query(`
+    SELECT
+      EXTRACT(HOUR FROM started_at)::INTEGER AS hour,
+      COUNT(*) AS call_count
+    FROM calls
+    WHERE host_id = $1 AND status = 'ended' AND started_at IS NOT NULL AND created_at >= ${since}
+    GROUP BY hour
+    ORDER BY hour
+  `, [hostId]);
+
+  // Daily earnings (for chart)
+  const { rows: dailyRows } = await query(`
+    SELECT
+      DATE(created_at) AS date,
+      COUNT(*) AS call_count,
+      COALESCE(SUM(host_earnings), 0) AS earnings
+    FROM calls
+    WHERE host_id = $1 AND status = 'ended' AND created_at >= ${since}
+    GROUP BY DATE(created_at)
+    ORDER BY date ASC
+  `, [hostId]);
+
+  // Top 5 callers
+  const { rows: topRows } = await query(`
+    SELECT
+      u.name, u.avatar,
+      COUNT(*) AS call_count,
+      COALESCE(SUM(c.amount_charged), 0) AS total_spent
+    FROM calls c
+    JOIN users u ON u.id = c.user_id
+    WHERE c.host_id = $1 AND c.status = 'ended' AND c.created_at >= ${since}
+    GROUP BY u.id, u.name, u.avatar
+    ORDER BY call_count DESC
+    LIMIT 5
+  `, [hostId]);
+
+  const s = sumRows[0];
+  const r = repeatRows[0];
+  const uniqueCallers = parseInt(r.unique_callers) || 0;
+  const repeatCallers = parseInt(r.repeat_callers) || 0;
+
+  const audioRow = typeRows.find(t => t.call_type === 'audio') || {};
+  const videoRow = typeRows.find(t => t.call_type === 'video') || {};
+
+  const result = {
+    summary: {
+      totalCalls: parseInt(s.total_calls),
+      totalEarnings: parseFloat(s.total_earnings).toFixed(2),
+      totalMinutes: Math.floor(parseInt(s.total_seconds) / 60),
+      avgCallDurationSeconds: Math.floor(parseFloat(s.avg_duration_seconds)),
+      uniqueCallers,
+      repeatCallers,
+      repeatCallerRate: uniqueCallers > 0 ? Math.round((repeatCallers / uniqueCallers) * 100) : 0,
+    },
+    callTypeBreakdown: {
+      audioCalls: parseInt(audioRow.count || 0),
+      videoCalls: parseInt(videoRow.count || 0),
+      audioEarnings: parseFloat(audioRow.earnings || 0).toFixed(2),
+      videoEarnings: parseFloat(videoRow.earnings || 0).toFixed(2),
+    },
+    peakHours: hourRows.map(h => ({ hour: h.hour, callCount: parseInt(h.call_count) })),
+    dailyEarnings: dailyRows.map(d => ({
+      date: d.date,
+      callCount: parseInt(d.call_count),
+      earnings: parseFloat(d.earnings).toFixed(2),
+    })),
+    topCallers: topRows.map(t => ({
+      name: t.name,
+      avatar: t.avatar,
+      callCount: parseInt(t.call_count),
+      totalSpent: parseFloat(t.total_spent).toFixed(2),
+    })),
+  };
+
+  // Cache for 1 hour
+  setex(cacheKey, 3600, result).catch(() => {});
+
+  return result;
+};
+
 module.exports = {
   getHosts, getHostById, getHostByUserId,
   createHostProfile, updateHostProfile,
   setOnlineStatus, toggleFollow, updateHostRating, getFollowing,
+  getHostAnalytics,
 };

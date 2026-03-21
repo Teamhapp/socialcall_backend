@@ -31,6 +31,7 @@ const walletRoutes        = require('./modules/wallet/wallet.routes');
 const streamsRoutes       = require('./modules/streams/streams.routes');
 const subscriptionsRoutes = require('./modules/subscriptions/subscriptions.routes');
 const adminRoutes         = require('./admin/admin.routes');
+const reportsRoutes       = require('./modules/reports/reports.routes');
 
 const app = express();
 
@@ -110,6 +111,7 @@ app.use('/api/wallet',        walletRoutes);
 app.use('/api/streams',       streamsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/admin',             adminRoutes);
+app.use('/api/reports',       reportsRoutes);
 
 // FCM token registration
 app.post('/api/users/fcm-token',

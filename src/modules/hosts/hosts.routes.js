@@ -31,7 +31,7 @@ const kycUpload = multer({
 
 // GET /api/hosts — list / search hosts
 router.get('/', optionalAuth, async (req, res) => {
-  const result = await svc.getHosts(req.query);
+  const result = await svc.getHosts({ ...req.query, excludeUserId: req.user?.id });
   res.json({ success: true, data: result });
 });
 
@@ -40,6 +40,16 @@ router.get('/me', authenticate, requireHost, async (req, res) => {
   const host = await svc.getHostByUserId(req.user.id);
   if (!host) return res.status(404).json({ success: false, message: 'Host profile not found' });
   res.json({ success: true, data: host });
+});
+
+// GET /api/hosts/me/analytics — host performance analytics
+router.get('/me/analytics', authenticate, requireHost, async (req, res) => {
+  const { period = '30d' } = req.query;
+  if (!['7d', '30d', '90d'].includes(period)) {
+    return res.status(400).json({ success: false, message: 'period must be 7d, 30d, or 90d' });
+  }
+  const data = await svc.getHostAnalytics(req.user.id, period);
+  res.json({ success: true, data });
 });
 
 // GET /api/hosts/following — hosts the current user follows

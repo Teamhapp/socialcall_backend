@@ -83,6 +83,32 @@ const saveMessage = async (senderId, receiverId, { content, messageType = 'text'
   return rows[0];
 };
 
+// ─── Save a voice message ─────────────────────────────────────────────────────
+const saveVoiceMessage = async (senderId, receiverId, voiceUrl, durationSeconds) => {
+  // Same interaction gate as text messages
+  const hasInteracted = await query(`
+    SELECT 1 FROM calls
+    WHERE (
+      (user_id = $1 AND host_id IN (SELECT id FROM hosts WHERE user_id = $2))
+      OR (user_id = $2 AND host_id IN (SELECT id FROM hosts WHERE user_id = $1))
+    )
+    AND status = 'ended'
+    LIMIT 1
+  `, [senderId, receiverId]);
+
+  if (!hasInteracted.rows[0]) {
+    throw { status: 403, message: 'Complete a call first to unlock chat' };
+  }
+
+  const { rows } = await query(`
+    INSERT INTO messages (sender_id, receiver_id, content, message_type, voice_url, voice_duration_seconds)
+    VALUES ($1, $2, $3, 'voice', $4, $5)
+    RETURNING *
+  `, [senderId, receiverId, '🎤 Voice message', voiceUrl, durationSeconds || null]);
+
+  return rows[0];
+};
+
 // ─── Mark messages read ───────────────────────────────────────────────────────
 const markAsRead = async (userId, senderId) => {
   await query(`
@@ -91,4 +117,4 @@ const markAsRead = async (userId, senderId) => {
   `, [senderId, userId]);
 };
 
-module.exports = { getConversations, getMessages, saveMessage, markAsRead };
+module.exports = { getConversations, getMessages, saveMessage, saveVoiceMessage, markAsRead };
