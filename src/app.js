@@ -112,6 +112,7 @@ app.use('/api/streams',       streamsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/admin',             adminRoutes);
 app.use('/api/reports',       reportsRoutes);
+app.use('/api/offers',        require('./modules/offers/offers.routes'));
 
 // FCM token registration
 app.post('/api/users/fcm-token',

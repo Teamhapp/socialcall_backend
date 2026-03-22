@@ -373,6 +373,61 @@ router.patch('/api/promo-codes/:id/deactivate', adminAuth, async (req, res) => {
   res.json({ success: true, message: 'Promo code deactivated' });
 });
 
+// ── Offers / Deals Banners ─────────────────────────────────────────────────────
+router.get('/api/offers', adminAuth, async (req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT id, title, subtitle, bg_color_hex, icon_emoji,
+             cta_label, promo_code, is_active, starts_at, ends_at, created_at
+      FROM   offers
+      ORDER  BY created_at DESC
+      LIMIT  100
+    `);
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.json({ success: true, data: [] });
+    }
+    throw err;
+  }
+});
+
+router.post('/api/offers', adminAuth, async (req, res) => {
+  const { title, subtitle, bg_color_hex = '#FF4D79', icon_emoji = '🎉',
+          cta_label = 'Claim Now', promo_code, starts_at, ends_at } = req.body || {};
+  if (!title || !ends_at) {
+    return res.status(400).json({ success: false, message: 'title and ends_at are required' });
+  }
+  try {
+    const { rows } = await query(`
+      INSERT INTO offers (title, subtitle, bg_color_hex, icon_emoji, cta_label, promo_code, starts_at, ends_at)
+      VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()), $8::timestamptz)
+      RETURNING *
+    `, [title, subtitle || null, bg_color_hex, icon_emoji, cta_label,
+        promo_code || null, starts_at || null, ends_at]);
+    logger.info('Admin created offer', { id: rows[0].id, title });
+    res.status(201).json({ success: true, data: rows[0] });
+  } catch (err) {
+    if (err.message?.includes('does not exist')) {
+      return res.status(503).json({ success: false, message: 'Run migration 008_offers.sql first' });
+    }
+    throw err;
+  }
+});
+
+router.patch('/api/offers/:id', adminAuth, async (req, res) => {
+  const { is_active } = req.body || {};
+  if (typeof is_active !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'is_active (boolean) required' });
+  }
+  const { rows } = await query(
+    'UPDATE offers SET is_active = $1 WHERE id = $2 RETURNING *',
+    [is_active, req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ success: false, message: 'Offer not found' });
+  res.json({ success: true, data: rows[0] });
+});
+
 // ── Offers — Bulk wallet bonus ────────────────────────────────────────────────
 router.post('/api/offers/wallet-bonus', adminAuth, async (req, res) => {
   const { amount, note, filter = 'all' } = req.body || {};
