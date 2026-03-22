@@ -2,9 +2,9 @@ const { query, withTransaction } = require('../../config/database');
 const { setex, get, del } = require('../../config/redis');
 
 // ─── List / Search Hosts ──────────────────────────────────────────────────────
-const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRate, sort = 'rating', search, excludeUserId }) => {
-  // Cache only simple first-page queries (no search/price filter/user exclusion)
-  const isSimple = !search && !minRate && !maxRate && !excludeUserId && page === 1;
+const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRate, sort = 'rating', search, excludeUserId, gender, age_group, tag }) => {
+  // Cache only simple first-page queries (no search/price filter/user exclusion/new filters)
+  const isSimple = !search && !minRate && !maxRate && !excludeUserId && !gender && !age_group && !tag && page === 1;
   const cacheKey = `hosts:list:${online || 'all'}:${language || 'any'}:${sort}:${limit}`;
   if (isSimple) {
     try {
@@ -39,6 +39,21 @@ const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRa
     params.push(`%${search}%`);
     conditions.push(`u.name ILIKE $${params.length}`);
   }
+  if (gender) {
+    params.push(gender);
+    conditions.push(`u.gender = $${params.length}`);
+  }
+  if (age_group === '18-25') {
+    conditions.push('u.age BETWEEN 18 AND 25');
+  } else if (age_group === '25-35') {
+    conditions.push('u.age BETWEEN 26 AND 35');
+  } else if (age_group === '35+') {
+    conditions.push('u.age > 35');
+  }
+  if (tag) {
+    params.push(tag);
+    conditions.push(`$${params.length} = ANY(h.tags)`);
+  }
 
   const orderMap = {
     rating: 'h.rating DESC',
@@ -58,7 +73,7 @@ const getHosts = async ({ page = 1, limit = 20, language, online, minRate, maxRa
       h.audio_rate_per_min, h.video_rate_per_min,
       h.rating, h.total_reviews, h.total_calls,
       h.is_online, h.is_verified, h.followers_count,
-      u.name, u.avatar
+      u.name, u.avatar, u.gender, u.age
     FROM hosts h
     JOIN users u ON u.id = h.user_id
     WHERE ${where}
@@ -376,23 +391,29 @@ const getHostAnalytics = async (userId, period = '30d') => {
 // Flow: (1) fetch/cache the ID pool, (2) pick at random in JS, (3) single-row
 // lookup by primary key.  excludeUserId is applied in JS, not the cache key,
 // so the cache is shared across all callers.
-const getRandomHost = async ({ language, excludeUserId } = {}, _retries = 0) => {
+const getRandomHost = async ({ language, gender, excludeUserId } = {}, _retries = 0) => {
   if (_retries > 2) throw { status: 404, message: 'No online hosts available right now.' };
 
-  const cacheKey = `online_host_ids:${language || 'any'}`;
+  // Cache key includes gender so filtered pools never pollute the unfiltered pool
+  const cacheKey = `online_host_ids:${gender || 'any'}:${language || 'any'}`;
   let pool = null;
   try { pool = await get(cacheKey); } catch (_) {}
 
   if (!pool) {
-    // Build the pool — lightweight query (IDs only, no joins)
+    // Build the pool — IDs only; must JOIN users when gender filter is present
     const params = [];
     const conditions = ['h.is_active = TRUE', 'h.is_online = TRUE'];
     if (language) {
       params.push(language);
       conditions.push(`$${params.length} = ANY(h.languages)`);
     }
+    if (gender) {
+      params.push(gender);
+      conditions.push(`u.gender = $${params.length}`);
+    }
+    const joinClause = gender ? 'JOIN users u ON u.id = h.user_id' : '';
     const { rows } = await query(
-      `SELECT h.id, h.user_id FROM hosts h WHERE ${conditions.join(' AND ')}`,
+      `SELECT h.id, h.user_id FROM hosts h ${joinClause} WHERE ${conditions.join(' AND ')}`,
       params
     );
     pool = rows.map(r => ({ id: r.id, userId: r.user_id }));
@@ -411,7 +432,7 @@ const getRandomHost = async ({ language, excludeUserId } = {}, _retries = 0) => 
       h.audio_rate_per_min, h.video_rate_per_min,
       h.rating, h.total_reviews, h.total_calls,
       h.is_online, h.is_verified, h.followers_count,
-      u.name, u.avatar
+      u.name, u.avatar, u.gender, u.age
     FROM hosts h
     JOIN users u ON u.id = h.user_id
     WHERE h.id = $1 AND h.is_active = TRUE AND h.is_online = TRUE
@@ -420,7 +441,7 @@ const getRandomHost = async ({ language, excludeUserId } = {}, _retries = 0) => 
   if (!rows[0]) {
     // Host went offline between cache build and lookup — bust cache and retry
     del(cacheKey).catch(() => {});
-    return getRandomHost({ language, excludeUserId }, _retries + 1);
+    return getRandomHost({ language, gender, excludeUserId }, _retries + 1);
   }
 
   return rows[0];

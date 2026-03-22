@@ -138,19 +138,35 @@ app.get('/api/users/profile', require('./middleware/auth').authenticate, async (
   res.json({ success: true, data: rows[0] });
 });
 
-// User profile — PATCH (update name / avatar)
+// User profile — PATCH (update name / avatar / gender / age)
 app.patch('/api/users/profile', require('./middleware/auth').authenticate, async (req, res) => {
   const { query } = require('./config/database');
-  const { name, avatar } = req.body;
+  const { name, avatar, gender, age } = req.body;
   const fields = [];
   const values = [];
   let idx = 1;
   if (name)   { fields.push(`name   = $${idx++}`); values.push(name.trim()); }
   if (avatar) { fields.push(`avatar = $${idx++}`); values.push(avatar); }
+  if (gender !== undefined) {
+    const allowed = ['male', 'female', 'other'];
+    if (gender !== null && !allowed.includes(gender)) {
+      return res.status(400).json({ success: false, message: 'gender must be male, female, or other' });
+    }
+    fields.push(`gender = $${idx++}`);
+    values.push(gender);
+  }
+  if (age !== undefined) {
+    const ageInt = parseInt(age);
+    if (age !== null && (isNaN(ageInt) || ageInt < 13 || ageInt > 100)) {
+      return res.status(400).json({ success: false, message: 'age must be between 13 and 100' });
+    }
+    fields.push(`age = $${idx++}`);
+    values.push(age === null ? null : ageInt);
+  }
   if (!fields.length) return res.status(400).json({ success: false, message: 'Nothing to update' });
   values.push(req.user.id);
   const { rows } = await query(
-    `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, name, avatar, phone, wallet_balance, is_host`,
+    `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, name, avatar, phone, wallet_balance, is_host, gender, age`,
     values
   );
   res.json({ success: true, data: rows[0] });

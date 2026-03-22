@@ -215,14 +215,36 @@ router.post('/payout', authenticate, requireHost, async (req, res) => {
   });
 });
 
-// GET /api/hosts/random — pick a random online host (optional ?language=Hindi)
+// GET /api/hosts/random — pick a random online host
+// Optional: ?language=Hindi  ?gender=female
 // Must be declared BEFORE /:id so "random" isn't parsed as a host ID.
 router.get('/random', optionalAuth, async (req, res) => {
+  const allowedGenders = ['male', 'female', 'other'];
+  const gender = allowedGenders.includes(req.query.gender) ? req.query.gender : null;
   const host = await svc.getRandomHost({
     language: req.query.language || null,
+    gender,
     excludeUserId: req.user?.id,
   });
   res.json({ success: true, data: host });
+});
+
+// GET /api/hosts/tags — distinct list of all tags in use (cached 5 min)
+// Must be declared BEFORE /:id
+router.get('/tags', async (req, res) => {
+  const { get: redisGet, setex } = require('../../config/redis');
+  const { query } = require('../../config/database');
+  const cacheKey = 'hosts:tags:all';
+  try {
+    const cached = await redisGet(cacheKey);
+    if (cached) return res.json({ success: true, data: cached });
+  } catch (_) {}
+  const { rows } = await query(
+    `SELECT DISTINCT unnest(tags) AS tag FROM hosts WHERE is_active = TRUE AND array_length(tags, 1) > 0 ORDER BY tag`
+  );
+  const tags = rows.map(r => r.tag).filter(Boolean);
+  try { await setex(cacheKey, 300, tags); } catch (_) {} // 5 min TTL
+  res.json({ success: true, data: tags });
 });
 
 // GET /api/hosts/:id — single host profile

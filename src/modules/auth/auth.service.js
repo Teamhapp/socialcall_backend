@@ -171,7 +171,7 @@ const verifyOtp = async (phone, otp) => {
 // ════════════════════════════════════════════════════════════════════════════════
 //  registerWithPassword  — create account with phone + password (no OTP needed)
 // ════════════════════════════════════════════════════════════════════════════════
-const registerWithPassword = async (phone, password, name) => {
+const registerWithPassword = async (phone, password, name, gender) => {
   const existing = await query('SELECT id, password_hash FROM users WHERE phone = $1', [phone]);
 
   if (existing.rows[0]) {
@@ -188,12 +188,14 @@ const registerWithPassword = async (phone, password, name) => {
     return { user: sanitizeUser(user), ...tokens, isNewUser: false };
   }
 
-  // Brand new user — create with password
+  // Brand new user — create with password (gender is optional/nullable)
+  const allowedGenders = ['male', 'female', 'other'];
+  const safeGender = allowedGenders.includes(gender) ? gender : null;
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   const { rows } = await query(
-    `INSERT INTO users (phone, name, password_hash, last_seen_at)
-     VALUES ($1, $2, $3, NOW()) RETURNING *`,
-    [phone, name || `User${phone.slice(-4)}`, passwordHash]
+    `INSERT INTO users (phone, name, password_hash, gender, last_seen_at)
+     VALUES ($1, $2, $3, $4, NOW()) RETURNING *`,
+    [phone, name || `User${phone.slice(-4)}`, passwordHash, safeGender]
   );
   const user = rows[0];
   logger.info('New user registered via password', { userId: user.id, phone });

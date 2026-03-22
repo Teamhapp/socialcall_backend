@@ -16,8 +16,8 @@ const verifyOtp = async (req, res) => {
 
 // POST /api/auth/register  — sign up with phone + password (no OTP needed)
 const register = async (req, res) => {
-  const { phone, password, name } = req.body;
-  const result = await authService.registerWithPassword(phone, password, name);
+  const { phone, password, name, gender } = req.body;
+  const result = await authService.registerWithPassword(phone, password, name, gender);
   res.status(result.isNewUser ? 201 : 200).json({
     success: true,
     message: result.isNewUser ? 'Registration successful' : 'Password added to existing account',
