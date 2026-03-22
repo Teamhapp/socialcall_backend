@@ -1,6 +1,8 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const http = require('http');
+const { createClient } = require('redis');
 const { Server } = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
 
 const app = require('./src/app');
 const { initSocket } = require('./src/socket/socket');
@@ -38,7 +40,21 @@ const start = async () => {
     await pool.query('SELECT NOW()');
     logger.info('✅ PostgreSQL connected');
 
-    // Connect Redis (truly non-blocking — server starts regardless)
+    // ── Socket.IO Redis adapter ─────────────────────────────────────────────
+    // Enables events to be broadcast across ALL server instances.
+    // Without this, io.to(room).emit() only reaches sockets on THIS process.
+    try {
+      const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+      const pubClient = createClient({ url: redisUrl });
+      const subClient = pubClient.duplicate();
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+      io.adapter(createAdapter(pubClient, subClient));
+      logger.info('✅ Socket.IO Redis adapter attached (multi-instance safe)');
+    } catch (err) {
+      logger.warn('⚠️  Socket.IO Redis adapter unavailable — single-instance mode', { error: err.message });
+    }
+
+    // Connect shared Redis client (truly non-blocking — server starts regardless)
     getRedisClient()
       .then(() => logger.info('✅ Redis connected'))
       .catch((err) => logger.warn('⚠️  Redis unavailable — running without cache', { error: err.message }));

@@ -1,13 +1,45 @@
 const router = require('express').Router();
 const { body } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const { validate } = require('../../middleware/errorHandler');
 const { authenticate } = require('../../middleware/auth');
 const ctrl = require('./auth.controller');
+
+// ─── Rate limiters ────────────────────────────────────────────────────────────
+
+// OTP: keyed per phone number — 3 OTPs/hour per number.
+// Prevents SMS-bombing a target and protects the SMS bill.
+const otpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3,
+  keyGenerator: (req) => {
+    // Normalise to digits so "+91 98765 43210" and "9876543210" share one bucket
+    const phone = (req.body?.phone || '').replace(/\D/g, '');
+    return `otp:${phone || req.ip}`;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many OTP requests for this number. Please wait 1 hour.',
+  },
+});
+
+// Login brute-force guard: 10 attempts / 15 min per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts. Try again in 15 minutes.' },
+});
 
 // ─── OTP Auth ─────────────────────────────────────────────────────────────────
 
 // POST /api/auth/send-otp
 router.post('/send-otp',
+  otpLimiter,
   [
     body('phone')
       .trim()
@@ -50,6 +82,7 @@ router.post('/register',
 
 // POST /api/auth/login-password  — sign in with phone + password
 router.post('/login-password',
+  loginLimiter,
   [
     body('phone').trim().notEmpty().withMessage('Phone is required'),
     body('password').notEmpty().withMessage('Password is required'),

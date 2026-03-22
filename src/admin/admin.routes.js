@@ -10,6 +10,15 @@ const { getRedisClient } = require('../config/redis');
 const logger = require('../config/logger');
 const notifService = require('../modules/notifications/notification.service');
 
+// ── Require ADMIN_SECRET — fail fast if missing ──────────────────────────────
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+if (!ADMIN_SECRET) {
+  throw new Error(
+    'ADMIN_SECRET env variable is not set. ' +
+    'Set a strong password in your .env file before starting the server.'
+  );
+}
+
 // ── Admin JWT middleware ───────────────────────────────────────────────────────
 const adminAuth = (req, res, next) => {
   const auth = req.headers.authorization;
@@ -18,7 +27,7 @@ const adminAuth = (req, res, next) => {
   }
   const token = auth.slice(7);
   try {
-    const secret = process.env.ADMIN_SECRET || 'admin_secret_change_me';
+    const secret = ADMIN_SECRET;
     req.admin = jwt.verify(token, secret);
     next();
   } catch {
@@ -34,7 +43,7 @@ router.get('/', (req, res) => {
 // ── Login ─────────────────────────────────────────────────────────────────────
 router.post('/api/login', (req, res) => {
   const { password } = req.body || {};
-  const secret = process.env.ADMIN_SECRET || 'admin_secret_change_me';
+  const secret = ADMIN_SECRET;
   if (!password || password !== secret) {
     logger.warn('Admin login failed attempt');
     return res.status(401).json({ success: false, message: 'Invalid password' });
@@ -550,7 +559,7 @@ router.get('/api/analytics/revenue.csv', async (req, res) => {
   const token = req.query.token;
   if (!token) return res.status(401).send('Unauthorized');
   try {
-    const secret = process.env.ADMIN_SECRET || 'admin_secret_change_me';
+    const secret = ADMIN_SECRET;
     jwt.verify(token, secret);
   } catch {
     return res.status(401).send('Invalid or expired token');

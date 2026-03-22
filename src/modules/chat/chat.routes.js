@@ -6,26 +6,77 @@ const svc = require('./chat.service');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const logger = require('../../config/logger');
 
-// ── Multer setup for voice uploads ────────────────────────────────────────────
-const voiceUploadDir = path.join(__dirname, '..', '..', '..', 'uploads', 'voice');
-if (!fs.existsSync(voiceUploadDir)) fs.mkdirSync(voiceUploadDir, { recursive: true });
+// ── Allowed audio MIME types ──────────────────────────────────────────────────
+const ALLOWED_AUDIO = [
+  'audio/m4a', 'audio/mp4', 'audio/aac',
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/x-m4a',
+];
+const audioFilter = (_, file, cb) =>
+  ALLOWED_AUDIO.includes(file.mimetype)
+    ? cb(null, true)
+    : cb(new Error('Only audio files allowed'));
 
-const voiceStorage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, voiceUploadDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.m4a';
-    cb(null, `voice_${req.user?.id}_${Date.now()}${ext}`);
-  },
-});
-const voiceUpload = multer({
-  storage: voiceStorage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB max
-  fileFilter: (_, file, cb) => {
-    const allowed = ['audio/m4a', 'audio/mp4', 'audio/aac', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/x-m4a'];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only audio files allowed'));
-  },
-});
+// ── Storage: S3 when env vars present, local disk otherwise ──────────────────
+// Set AWS_S3_BUCKET + AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY to use S3.
+// S3 is required for multi-instance deployments; local disk is single-instance only.
+const HAS_S3 = !!(
+  process.env.AWS_S3_BUCKET &&
+  process.env.AWS_ACCESS_KEY_ID &&
+  process.env.AWS_SECRET_ACCESS_KEY
+);
+
+let voiceUpload;
+
+if (HAS_S3) {
+  const { S3Client } = require('@aws-sdk/client-s3');
+  const multerS3    = require('multer-s3');
+
+  const s3 = new S3Client({
+    region: process.env.AWS_REGION || 'ap-south-1',
+    credentials: {
+      accessKeyId:     process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
+  });
+
+  voiceUpload = multer({
+    storage: multerS3({
+      s3,
+      bucket:      process.env.AWS_S3_BUCKET,
+      acl:         'public-read',
+      contentType: multerS3.AUTO_CONTENT_TYPE,
+      key: (req, file, cb) => {
+        const ext = path.extname(file.originalname) || '.m4a';
+        cb(null, `voice/${req.user?.id}_${Date.now()}${ext}`);
+      },
+    }),
+    limits:     { fileSize: 2 * 1024 * 1024 },
+    fileFilter: audioFilter,
+  });
+
+  logger.info('Voice upload: S3 storage active', { bucket: process.env.AWS_S3_BUCKET });
+} else {
+  // Local disk fallback — works on a single instance.
+  // For multi-instance: set AWS_S3_BUCKET env var to switch to S3 automatically.
+  const voiceUploadDir = path.join(__dirname, '..', '..', '..', 'uploads', 'voice');
+  if (!fs.existsSync(voiceUploadDir)) fs.mkdirSync(voiceUploadDir, { recursive: true });
+
+  voiceUpload = multer({
+    storage: multer.diskStorage({
+      destination: (_, __, cb) => cb(null, voiceUploadDir),
+      filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname) || '.m4a';
+        cb(null, `voice_${req.user?.id}_${Date.now()}${ext}`);
+      },
+    }),
+    limits:     { fileSize: 2 * 1024 * 1024 },
+    fileFilter: audioFilter,
+  });
+
+  logger.info('Voice upload: local disk (set AWS_S3_BUCKET for multi-instance S3 storage)');
+}
 
 // GET /api/chat — all conversations
 router.get('/', authenticate, async (req, res) => {
@@ -60,16 +111,19 @@ router.post('/:userId/voice',
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Audio file is required' });
     }
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const voiceUrl = `${baseUrl}/uploads/voice/${req.file.filename}`;
-    const durationSeconds = req.body.duration ? parseInt(req.body.duration) : null;
 
+    // S3 uploads set req.file.location (public URL); local disk uses filename
+    const voiceUrl = req.file.location
+      ? req.file.location
+      : `${req.protocol}://${req.get('host')}/uploads/voice/${req.file.filename}`;
+
+    const durationSeconds = req.body.duration ? parseInt(req.body.duration) : null;
     const message = await svc.saveVoiceMessage(req.user.id, req.params.userId, voiceUrl, durationSeconds);
 
-    // Emit socket event so receiver sees it in real time
+    // Emit to receiver's room (works cross-instance via Redis adapter)
     const io = req.app.get('io');
     if (io) {
-      io.to(req.params.userId).emit('new_message', message);
+      io.to(`user:${req.params.userId}`).emit('new_message', message);
     }
 
     res.status(201).json({ success: true, data: message });

@@ -60,45 +60,63 @@ async function notifyFollowersOnline(io, hostUserId) {
 
 // ─── Per-call server-side wallet watch ───────────────────────────────────────
 // Prevents calls from running past wallet balance even if Flutter client dies.
+// Cross-instance safe: uses DB started_at (not in-memory wall clock) for cost
+// calculation, and a Redis distributed lock to prevent double-watching.
 const callCheckIntervals = new Map();
+const INSTANCE_ID = `${require('os').hostname()}_${process.pid}`;
 
 function startWalletCheck(io, callId, callerId, ratePerMin) {
   if (callCheckIntervals.has(callId)) return;
-  const startedAt = Date.now();
+
+  // Claim this call's watch slot in Redis — other instances skip if already claimed.
+  // TTL = 4h (max call length). Refreshed on every interval tick.
+  setex(`callwatch:${callId}`, 14400, INSTANCE_ID).catch(() => {});
+
   const intervalId = setInterval(async () => {
     try {
-      const { rows } = await query(
-        'SELECT wallet_balance FROM users WHERE id = $1', [callerId]
+      // Always read started_at from DB — accurate across restarts + instances.
+      const callRow = await query(
+        "SELECT started_at FROM calls WHERE id = $1 AND status = 'connected'",
+        [callId]
       );
+      if (!callRow.rows[0]) {
+        // Call ended by other means — clean up
+        clearInterval(intervalId);
+        callCheckIntervals.delete(callId);
+        del(`callwatch:${callId}`).catch(() => {});
+        return;
+      }
+
+      // Refresh Redis lock TTL so it doesn't expire mid-call
+      setex(`callwatch:${callId}`, 14400, INSTANCE_ID).catch(() => {});
+
+      const elapsedMin = (Date.now() - new Date(callRow.rows[0].started_at).getTime()) / 60000;
+      const { rows }   = await query('SELECT wallet_balance FROM users WHERE id = $1', [callerId]);
       const balance    = parseFloat(rows[0]?.wallet_balance || 0);
-      const elapsedMin = (Date.now() - startedAt) / 60000;
       const cost       = elapsedMin * ratePerMin;
       const remaining  = balance - cost;
       const minsLeft   = remaining / ratePerMin;
 
       if (minsLeft <= 0) {
-        // Wallet depleted — force-end the call
         clearInterval(intervalId);
         callCheckIntervals.delete(callId);
+        del(`callwatch:${callId}`).catch(() => {});
         try {
           const result = await callsService.endCall(callId, callerId);
           const callRes = await query(
-            'SELECT user_id, host_id FROM calls WHERE id = $1', [callId]
+            `SELECT c.user_id, h.user_id AS host_user_id
+             FROM calls c JOIN hosts h ON h.id = c.host_id WHERE c.id = $1`,
+            [callId]
           );
           const call = callRes.rows[0];
           if (call) {
-            const hostRes = await query(
-              'SELECT user_id FROM hosts WHERE id = $1', [call.host_id]
-            );
-            const hostUserId = hostRes.rows[0]?.user_id;
-            io.to(`user:${call.user_id}`).to(`user:${hostUserId}`)
+            io.to(`user:${call.user_id}`).to(`user:${call.host_user_id}`)
               .emit('call_summary', { callId, ...result, autoEnded: true });
           }
         } catch (err) {
           logger.error('Auto-end call failed', { callId, err: err.message });
         }
       } else if (minsLeft < 1) {
-        // Under 1 minute left — warn the caller
         io.to(`user:${callerId}`).emit('wallet_low_warning', {
           callId, minsLeft: minsLeft.toFixed(1),
         });
@@ -107,7 +125,8 @@ function startWalletCheck(io, callId, callerId, ratePerMin) {
       logger.error('Wallet check error', { callId, err: err.message });
     }
   }, 30000); // check every 30 s
-  callCheckIntervals.set(callId, { intervalId, callerId, ratePerMin, startedAt });
+
+  callCheckIntervals.set(callId, { intervalId, callerId, ratePerMin });
 }
 
 function stopWalletCheck(callId) {
@@ -115,6 +134,33 @@ function stopWalletCheck(callId) {
   if (entry) {
     clearInterval(entry.intervalId);
     callCheckIntervals.delete(callId);
+    del(`callwatch:${callId}`).catch(() => {});
+  }
+}
+
+// ─── Startup recovery ────────────────────────────────────────────────────────
+// Re-attach wallet watches for calls that were in progress before this process
+// started (e.g. after a rolling restart or crash). Skips calls already watched
+// by another live instance (Redis lock).
+async function recoverActiveCallWatches(io) {
+  try {
+    const { rows } = await query(`
+      SELECT c.id, c.user_id, c.rate_per_min
+      FROM calls c
+      WHERE c.status = 'connected'
+        AND c.started_at > NOW() - INTERVAL '4 hours'
+    `);
+    let recovered = 0;
+    for (const call of rows) {
+      const alreadyWatched = await get(`callwatch:${call.id}`).catch(() => null);
+      if (!alreadyWatched) {
+        startWalletCheck(io, call.id, call.user_id, parseFloat(call.rate_per_min));
+        recovered++;
+      }
+    }
+    if (recovered > 0) logger.info(`Recovered ${recovered} active call watch(es) after restart`);
+  } catch (err) {
+    logger.warn('Could not recover call watches on startup', { err: err.message });
   }
 }
 
@@ -461,7 +507,10 @@ const initSocket = (io) => {
     });
   });
 
+  // Recover wallet watches for calls that were live before this process started
+  setImmediate(() => recoverActiveCallWatches(io).catch(() => {}));
+
   return io;
 };
 
-module.exports = { initSocket, isUserOnline, startWalletCheck, stopWalletCheck, notifyFollowersOnline };
+module.exports = { initSocket, isUserOnline, startWalletCheck, stopWalletCheck, notifyFollowersOnline, recoverActiveCallWatches };

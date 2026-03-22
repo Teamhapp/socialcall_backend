@@ -215,6 +215,16 @@ router.post('/payout', authenticate, requireHost, async (req, res) => {
   });
 });
 
+// GET /api/hosts/random — pick a random online host (optional ?language=Hindi)
+// Must be declared BEFORE /:id so "random" isn't parsed as a host ID.
+router.get('/random', optionalAuth, async (req, res) => {
+  const host = await svc.getRandomHost({
+    language: req.query.language || null,
+    excludeUserId: req.user?.id,
+  });
+  res.json({ success: true, data: host });
+});
+
 // GET /api/hosts/:id — single host profile
 router.get('/:id', optionalAuth, async (req, res) => {
   const host = await svc.getHostById(req.params.id, req.user?.id);

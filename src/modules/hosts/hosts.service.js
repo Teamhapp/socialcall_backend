@@ -106,7 +106,7 @@ const getHostById = async (hostId, viewerUserId = null) => {
       ) AS is_following,` : 'FALSE AS is_following,'}
       COALESCE(
         (SELECT json_agg(r ORDER BY r.created_at DESC) FROM (
-          SELECT rv.rating, rv.comment, rv.created_at, u2.name AS reviewer_name
+          SELECT rv.rating, rv.comment, rv.created_at, u2.name AS reviewer_name, u2.avatar AS reviewer_avatar
           FROM reviews rv JOIN users u2 ON u2.id = rv.user_id
           WHERE rv.host_id = h.id
           LIMIT 10
@@ -370,9 +370,65 @@ const getHostAnalytics = async (userId, period = '30d') => {
   return result;
 };
 
+// ─── Random Online Host ───────────────────────────────────────────────────────
+// Uses a 30-second Redis cache of online host IDs to avoid ORDER BY RANDOM()
+// full-table scans (which degrade from O(1) to O(n) as the host count grows).
+// Flow: (1) fetch/cache the ID pool, (2) pick at random in JS, (3) single-row
+// lookup by primary key.  excludeUserId is applied in JS, not the cache key,
+// so the cache is shared across all callers.
+const getRandomHost = async ({ language, excludeUserId } = {}, _retries = 0) => {
+  if (_retries > 2) throw { status: 404, message: 'No online hosts available right now.' };
+
+  const cacheKey = `online_host_ids:${language || 'any'}`;
+  let pool = null;
+  try { pool = await get(cacheKey); } catch (_) {}
+
+  if (!pool) {
+    // Build the pool — lightweight query (IDs only, no joins)
+    const params = [];
+    const conditions = ['h.is_active = TRUE', 'h.is_online = TRUE'];
+    if (language) {
+      params.push(language);
+      conditions.push(`$${params.length} = ANY(h.languages)`);
+    }
+    const { rows } = await query(
+      `SELECT h.id, h.user_id FROM hosts h WHERE ${conditions.join(' AND ')}`,
+      params
+    );
+    pool = rows.map(r => ({ id: r.id, userId: r.user_id }));
+    setex(cacheKey, 30, pool).catch(() => {}); // 30 s TTL
+  }
+
+  // Filter out the caller's own host profile (if any) — in JS, no extra DB hit
+  const eligible = excludeUserId ? pool.filter(h => h.userId !== excludeUserId) : pool;
+  if (!eligible.length) throw { status: 404, message: 'No online hosts available right now.' };
+
+  // Pick a random entry, then fetch the full row by PK (instant index scan)
+  const pick = eligible[Math.floor(Math.random() * eligible.length)];
+  const { rows } = await query(`
+    SELECT
+      h.id, h.user_id, h.bio, h.languages, h.tags,
+      h.audio_rate_per_min, h.video_rate_per_min,
+      h.rating, h.total_reviews, h.total_calls,
+      h.is_online, h.is_verified, h.followers_count,
+      u.name, u.avatar
+    FROM hosts h
+    JOIN users u ON u.id = h.user_id
+    WHERE h.id = $1 AND h.is_active = TRUE AND h.is_online = TRUE
+  `, [pick.id]);
+
+  if (!rows[0]) {
+    // Host went offline between cache build and lookup — bust cache and retry
+    del(cacheKey).catch(() => {});
+    return getRandomHost({ language, excludeUserId }, _retries + 1);
+  }
+
+  return rows[0];
+};
+
 module.exports = {
   getHosts, getHostById, getHostByUserId,
   createHostProfile, updateHostProfile,
   setOnlineStatus, toggleFollow, updateHostRating, getFollowing,
-  getHostAnalytics,
+  getHostAnalytics, getRandomHost,
 };
